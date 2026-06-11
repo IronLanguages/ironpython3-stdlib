@@ -243,21 +243,34 @@ class TestSysConfig(unittest.TestCase):
     def test_symlink(self):
         # On Windows, the EXE needs to know where pythonXY.dll is at so we have
         # to add the directory to the path.
+        env = None
         if sys.platform == "win32":
-            os.environ["PATH"] = "{};{}".format(
-                os.path.dirname(sys.executable), os.environ["PATH"])
+            env = {k.upper(): os.environ[k] for k in os.environ}
+            env["PATH"] = "{};{}".format(
+                os.path.dirname(sys.executable), env.get("PATH", ""))
+            # Requires PYTHONHOME as well since we locate stdlib from the
+            # EXE path and not the DLL path (which should be fixed)
+            env["PYTHONHOME"] = os.path.dirname(sys.executable)
+            if sysconfig.is_python_build(True):
+                env["PYTHONPATH"] = os.path.dirname(os.__file__)
 
         # Issue 7880
-        def get(python):
+        def get(python, env=None):
             cmd = [python, '-c',
                    'import sysconfig; print(sysconfig.get_platform())']
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, env=os.environ)
-            return p.communicate()
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, env=env)
+            out, err = p.communicate()
+            if p.returncode:
+                print((out, err))
+                self.fail('Non-zero return code {0} (0x{0:08X})'
+                            .format(p.returncode))
+            return out, err
         real = os.path.realpath(sys.executable)
         link = os.path.abspath(TESTFN)
         os.symlink(real, link)
         try:
-            self.assertEqual(get(real), get(link))
+            self.assertEqual(get(real), get(link, env))
         finally:
             unlink(link)
 
@@ -386,7 +399,9 @@ class TestSysConfig(unittest.TestCase):
         self.assertIsNotNone(vars['SO'])
         self.assertEqual(vars['SO'], vars['EXT_SUFFIX'])
 
-    @unittest.skipUnless(sys.platform == 'linux', 'Linux-specific test')
+    @unittest.skipUnless(sys.platform == 'linux' and
+                         hasattr(sys.implementation, '_multiarch'),
+                         'multiarch-specific test')
     def test_triplet_in_ext_suffix(self):
         ctypes = import_module('ctypes')
         import platform, re
@@ -396,8 +411,8 @@ class TestSysConfig(unittest.TestCase):
             self.assertTrue('linux' in suffix, suffix)
         if re.match('(i[3-6]86|x86_64)$', machine):
             if ctypes.sizeof(ctypes.c_char_p()) == 4:
-                self.assertTrue(suffix.endswith('i386-linux-gnu.so') \
-                                or suffix.endswith('x86_64-linux-gnux32.so'),
+                self.assertTrue(suffix.endswith('i386-linux-gnu.so') or
+                                suffix.endswith('x86_64-linux-gnux32.so'),
                                 suffix)
             else: # 8 byte pointer size
                 self.assertTrue(suffix.endswith('x86_64-linux-gnu.so'), suffix)

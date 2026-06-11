@@ -7,22 +7,12 @@ from test import support
 import weakref
 import pickle
 import operator
-import io
-import math
 import struct
 import sys
 import warnings
 
 import array
 from array import _array_reconstructor as array_reconstructor
-
-try:
-    # Try to determine availability of long long independently
-    # of the array module under test
-    struct.calcsize('@q')
-    have_long_long = True
-except struct.error:
-    have_long_long = False
 
 sizeof_wchar = array.array('u').itemsize
 
@@ -34,9 +24,7 @@ class ArraySubclassWithKwargs(array.array):
     def __init__(self, typecode, newarg=None):
         array.array.__init__(self)
 
-typecodes = "ubBhHiIlLfd"
-if have_long_long:
-    typecodes += 'qQ'
+typecodes = 'ubBhHiIlLfdqQ'
 
 class MiscTest(unittest.TestCase):
 
@@ -328,8 +316,19 @@ class BaseTest:
             d = pickle.dumps((itorig, orig), proto)
             it, a = pickle.loads(d)
             a.fromlist(data2)
-            self.assertEqual(type(it), type(itorig))
-            self.assertEqual(list(it), data2)
+            self.assertEqual(list(it), [])
+
+    def test_exhausted_iterator(self):
+        a = array.array(self.typecode, self.example)
+        self.assertEqual(list(a), list(self.example))
+        exhit = iter(a)
+        empit = iter(a)
+        for x in exhit:  # exhaust the iterator
+            next(empit)  # not exhausted
+        a.append(self.outside)
+        self.assertEqual(list(exhit), [])
+        self.assertEqual(list(empit), [self.outside])
+        self.assertEqual(list(a), list(self.example) + [self.outside])
 
     def test_insert(self):
         a = array.array(self.typecode, self.example)
@@ -1080,6 +1079,12 @@ class BaseTest:
         a = array.array('B', b"")
         self.assertRaises(BufferError, getbuffer_with_null_view, a)
 
+    def test_free_after_iterating(self):
+        support.check_free_after_iterating(self, iter, array.array,
+                                           (self.typecode,))
+        support.check_free_after_iterating(self, reversed, array.array,
+                                           (self.typecode,))
+
 class StringTest(BaseTest):
 
     def test_setitem(self):
@@ -1320,12 +1325,10 @@ class UnsignedLongTest(UnsignedNumberTest, unittest.TestCase):
     typecode = 'L'
     minitemsize = 4
 
-@unittest.skipIf(not have_long_long, 'need long long support')
 class LongLongTest(SignedNumberTest, unittest.TestCase):
     typecode = 'q'
     minitemsize = 8
 
-@unittest.skipIf(not have_long_long, 'need long long support')
 class UnsignedLongLongTest(UnsignedNumberTest, unittest.TestCase):
     typecode = 'Q'
     minitemsize = 8

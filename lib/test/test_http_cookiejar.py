@@ -181,12 +181,10 @@ class DateTimeTests(unittest.TestCase):
             '1980-01-01 00:61:00',
             '01-01-1980 00:00:62',
             '01-01-1980T00:00:62',
-            '19800101T250000Z'
-            '1980-01-01 00:00:00 -2500',
+            '19800101T250000Z',
             ]:
             self.assertIsNone(iso2time(test),
-                              "iso2time(%s) is not None\n"
-                              "iso2time(test) %s" % (test, iso2time(test)))
+                              "iso2time(%r)" % test)
 
     def test_iso2time_performance_regression(self):
         # If ISO_DATE_RE regresses to quadratic complexity, this test will take a very long time to succeed.
@@ -724,16 +722,14 @@ class CookieTests(unittest.TestCase):
                          ('/foo/bar', True),
                          ('/', False),
                          ('/foobad/foo', False)]:
-            url = '{0}{1}'.format(base_url, path)
+            url = f'{base_url}{path}'
             req = urllib.request.Request(url)
             h = interact_netscape(c, url)
             if ok:
-                self.assertIn('spam=eggs', h,
-                              "cookie not set for {0}".format(path))
+                self.assertIn('spam=eggs', h, f"cookie not set for {path}")
                 self.assertTrue(strict_ns_path_pol.set_ok_path(cookie, req))
             else:
-                self.assertNotIn('spam=eggs', h,
-                                 "cookie set for {0}".format(path))
+                self.assertNotIn('spam=eggs', h, f"cookie set for {path}")
                 self.assertFalse(strict_ns_path_pol.set_ok_path(cookie, req))
 
     def test_request_port(self):
@@ -1120,7 +1116,7 @@ class CookieTests(unittest.TestCase):
         url = "http://foo.bar.com/"
         interact_2965(c, url, "spam=eggs; Version=1; Port")
         h = interact_2965(c, url)
-        self.assertRegex(h, "\$Port([^=]|$)",
+        self.assertRegex(h, r"\$Port([^=]|$)",
                          "port with no value not returned with no value")
 
         c = CookieJar(pol)
@@ -1465,9 +1461,9 @@ class LWPCookieTests(unittest.TestCase):
 
         self.assertRegex(cookie, r'^\$Version="?1"?;')
         self.assertRegex(cookie, r'Part_Number="?Rocket_Launcher_0001"?;'
-                                  '\s*\$Path="\/acme"')
+                                 r'\s*\$Path="\/acme"')
         self.assertRegex(cookie, r'Customer="?WILE_E_COYOTE"?;'
-                                  '\s*\$Path="\/acme"')
+                                 r'\s*\$Path="\/acme"')
 
         #
         #   7.  User Agent -> Server

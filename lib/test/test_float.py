@@ -1,6 +1,4 @@
-
 import fractions
-import math
 import operator
 import os
 import random
@@ -10,6 +8,8 @@ import time
 import unittest
 
 from test import support
+from test.test_grammar import (VALID_UNDERSCORE_LITERALS,
+                               INVALID_UNDERSCORE_LITERALS)
 from math import isinf, isnan, copysign, ldexp
 
 INF = float("inf")
@@ -60,6 +60,30 @@ class GeneralFloatCases(unittest.TestCase):
         # extra long strings should not be a problem
         float(b'.' + b'1'*1000)
         float('.' + '1'*1000)
+        # Invalid unicode string
+        # See bpo-34087
+        self.assertRaises(ValueError, float, '\u3053\u3093\u306b\u3061\u306f')
+
+    def test_underscores(self):
+        for lit in VALID_UNDERSCORE_LITERALS:
+            if not any(ch in lit for ch in 'jJxXoObB'):
+                self.assertEqual(float(lit), eval(lit))
+                self.assertEqual(float(lit), float(lit.replace('_', '')))
+        for lit in INVALID_UNDERSCORE_LITERALS:
+            if lit in ('0_7', '09_99'):  # octals are not recognized here
+                continue
+            if not any(ch in lit for ch in 'jJxXoObB'):
+                self.assertRaises(ValueError, float, lit)
+        # Additional test cases; nan and inf are never valid as literals,
+        # only in the float() constructor, but we don't allow underscores
+        # in or around them.
+        self.assertRaises(ValueError, float, '_NaN')
+        self.assertRaises(ValueError, float, 'Na_N')
+        self.assertRaises(ValueError, float, 'IN_F')
+        self.assertRaises(ValueError, float, '-_INF')
+        self.assertRaises(ValueError, float, '-INF_')
+        # Check that we handle bytes values correctly.
+        self.assertRaises(ValueError, float, b'0_.\xff9')
 
     def test_non_numeric_input_types(self):
         # Test possible non-numeric types for the argument x, including
@@ -174,11 +198,12 @@ class GeneralFloatCases(unittest.TestCase):
             def __float__(self):
                 return float(str(self)) + 1
 
-        self.assertAlmostEqual(float(Foo1()), 42.)
-        self.assertAlmostEqual(float(Foo2()), 42.)
-        self.assertAlmostEqual(float(Foo3(21)), 42.)
+        self.assertEqual(float(Foo1()), 42.)
+        self.assertEqual(float(Foo2()), 42.)
+        with self.assertWarns(DeprecationWarning):
+            self.assertEqual(float(Foo3(21)), 42.)
         self.assertRaises(TypeError, float, Foo4(42))
-        self.assertAlmostEqual(float(FooStr('8')), 9.)
+        self.assertEqual(float(FooStr('8')), 9.)
 
         class Foo5:
             def __float__(self):
@@ -189,10 +214,14 @@ class GeneralFloatCases(unittest.TestCase):
         class F:
             def __float__(self):
                 return OtherFloatSubclass(42.)
-        self.assertAlmostEqual(float(F()), 42.)
-        self.assertIs(type(float(F())), OtherFloatSubclass)
-        self.assertAlmostEqual(FloatSubclass(F()), 42.)
-        self.assertIs(type(FloatSubclass(F())), FloatSubclass)
+        with self.assertWarns(DeprecationWarning):
+            self.assertEqual(float(F()), 42.)
+        with self.assertWarns(DeprecationWarning):
+            self.assertIs(type(float(F())), float)
+        with self.assertWarns(DeprecationWarning):
+            self.assertEqual(FloatSubclass(F()), 42.)
+        with self.assertWarns(DeprecationWarning):
+            self.assertIs(type(FloatSubclass(F())), FloatSubclass)
 
     def test_is_integer(self):
         self.assertFalse((1.1).is_integer())
@@ -587,6 +616,12 @@ class IEEEFormatTestCase(unittest.TestCase):
                           ('<f', LE_FLOAT_NAN)]:
             struct.unpack(fmt, data)
 
+    @support.requires_IEEE_754
+    def test_serialized_float_rounding(self):
+        from _testcapi import FLT_MAX
+        self.assertEqual(struct.pack("<f", 3.40282356e38), struct.pack("<f", FLT_MAX))
+        self.assertEqual(struct.pack("<f", -3.40282356e38), struct.pack("<f", -FLT_MAX))
+
 class FormatTestCase(unittest.TestCase):
 
     def test_format(self):
@@ -661,6 +696,25 @@ class FormatTestCase(unittest.TestCase):
         self.assertEqual(format(123.456, '.4'), '123.5')
         self.assertEqual(format(1234.56, '.4'), '1.235e+03')
         self.assertEqual(format(12345.6, '.4'), '1.235e+04')
+
+    def test_issue35560(self):
+        self.assertEqual(format(123.0, '00'), '123.0')
+        self.assertEqual(format(123.34, '00f'), '123.340000')
+        self.assertEqual(format(123.34, '00e'), '1.233400e+02')
+        self.assertEqual(format(123.34, '00g'), '123.34')
+        self.assertEqual(format(123.34, '00.10f'), '123.3400000000')
+        self.assertEqual(format(123.34, '00.10e'), '1.2334000000e+02')
+        self.assertEqual(format(123.34, '00.10g'), '123.34')
+        self.assertEqual(format(123.34, '01f'), '123.340000')
+
+        self.assertEqual(format(-123.0, '00'), '-123.0')
+        self.assertEqual(format(-123.34, '00f'), '-123.340000')
+        self.assertEqual(format(-123.34, '00e'), '-1.233400e+02')
+        self.assertEqual(format(-123.34, '00g'), '-123.34')
+        self.assertEqual(format(-123.34, '00.10f'), '-123.3400000000')
+        self.assertEqual(format(-123.34, '00.10f'), '-123.3400000000')
+        self.assertEqual(format(-123.34, '00.10e'), '-1.2334000000e+02')
+        self.assertEqual(format(-123.34, '00.10g'), '-123.34')
 
 class ReprTestCase(unittest.TestCase):
     def test_repr(self):

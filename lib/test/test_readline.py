@@ -3,6 +3,7 @@ Very minimal unittests for parts of the readline module.
 """
 from contextlib import ExitStack
 from errno import EIO
+import locale
 import os
 import selectors
 import subprocess
@@ -121,7 +122,29 @@ class TestReadline(unittest.TestCase):
                                               TERM='xterm-256color')
         self.assertEqual(stdout, b'')
 
+    auto_history_script = """\
+import readline
+readline.set_auto_history({})
+input()
+print("History length:", readline.get_current_history_length())
+"""
+
+    def test_auto_history_enabled(self):
+        output = run_pty(self.auto_history_script.format(True))
+        self.assertIn(b"History length: 1\r\n", output)
+
+    def test_auto_history_disabled(self):
+        output = run_pty(self.auto_history_script.format(False))
+        self.assertIn(b"History length: 0\r\n", output)
+
     def test_nonascii(self):
+        loc = locale.setlocale(locale.LC_CTYPE, None)
+        if loc in ('C', 'POSIX'):
+            # bpo-29240: On FreeBSD, if the LC_CTYPE locale is C or POSIX,
+            # writing and reading non-ASCII bytes into/from a TTY works, but
+            # readline or ncurses ignores non-ASCII bytes on read.
+            self.skipTest(f"the LC_CTYPE locale is {loc!r}")
+
         try:
             readline.add_history("\xEB\xEF")
         except UnicodeEncodeError as err:

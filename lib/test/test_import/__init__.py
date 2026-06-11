@@ -10,6 +10,8 @@ import py_compile
 import random
 import stat
 import sys
+import threading
+import time
 import unittest
 import unittest.mock as mock
 import textwrap
@@ -69,6 +71,18 @@ class ImportTests(unittest.TestCase):
 
     def tearDown(self):
         unload(TESTFN)
+
+    def test_import_raises_ModuleNotFoundError(self):
+        with self.assertRaises(ModuleNotFoundError):
+            import something_that_should_not_exist_anywhere
+
+    def test_from_import_missing_module_raises_ModuleNotFoundError(self):
+        with self.assertRaises(ModuleNotFoundError):
+            from something_that_should_not_exist_anywhere import blah
+
+    def test_from_import_missing_attr_raises_ImportError(self):
+        with self.assertRaises(ImportError):
+            from importlib import something_that_should_not_exist_anywhere
 
     def test_case_sensitivity(self):
         # Brief digression to test that import is case-sensitive:  if we got
@@ -339,6 +353,44 @@ class ImportTests(unittest.TestCase):
         with self.assertRaises(ImportError):
             from test_from_import_AttributeError import does_not_exist
 
+    @cpython_only
+    def test_issue31492(self):
+        # There shouldn't be an assertion failure in case of failing to import
+        # from a module with a bad __name__ attribute, or in case of failing
+        # to access an attribute of such a module.
+        with swap_attr(os, '__name__', None):
+            with self.assertRaises(ImportError):
+                from os import does_not_exist
+
+            with self.assertRaises(AttributeError):
+                os.does_not_exist
+
+    def test_concurrency(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'data'))
+        try:
+            exc = None
+            def run():
+                event.wait()
+                try:
+                    import package
+                except BaseException as e:
+                    nonlocal exc
+                    exc = e
+
+            for i in range(10):
+                event = threading.Event()
+                threads = [threading.Thread(target=run) for x in range(2)]
+                try:
+                    with test.support.start_threads(threads, event.set):
+                        time.sleep(0)
+                finally:
+                    sys.modules.pop('package', None)
+                    sys.modules.pop('package.submodule', None)
+                if exc is not None:
+                    raise exc
+        finally:
+            del sys.path[0]
+
 
 @skip_if_dont_write_bytecode
 class FilePermissionTests(unittest.TestCase):
@@ -601,11 +653,11 @@ class RelativeImportTests(unittest.TestCase):
 
         # Check relative import fails with only __package__ wrong
         ns = dict(__package__='foo', __name__='test.notarealmodule')
-        self.assertRaises(ImportError, check_relative)
+        self.assertRaises(ModuleNotFoundError, check_relative)
 
         # Check relative import fails with __package__ and __name__ wrong
         ns = dict(__package__='foo', __name__='notarealpkg.notarealmodule')
-        self.assertRaises(ImportError, check_relative)
+        self.assertRaises(ModuleNotFoundError, check_relative)
 
         # Check relative import fails with package set to a non-string
         ns = dict(__package__=object())
@@ -727,8 +779,11 @@ class PycacheTests(unittest.TestCase):
         unload(TESTFN)
         importlib.invalidate_caches()
         m = __import__(TESTFN)
-        self.assertEqual(m.__file__,
-                         os.path.join(os.curdir, os.path.relpath(pyc_file)))
+        try:
+            self.assertEqual(m.__file__,
+                             os.path.join(os.curdir, os.path.relpath(pyc_file)))
+        finally:
+            os.remove(pyc_file)
 
     def test___cached__(self):
         # Modules now also have an __cached__ that points to the pyc file.

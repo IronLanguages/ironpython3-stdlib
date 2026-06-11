@@ -93,6 +93,14 @@ class TestSFbugs(unittest.TestCase):
         self.assertEqual("+ \t\tI am a bug", diff[2])
         self.assertEqual("? +\n", diff[3])
 
+    def test_mdiff_catch_stop_iteration(self):
+        # Issue #33224
+        self.assertEqual(
+            list(difflib._mdiff(["2"], ["3"], 1)),
+            [((1, '\x00-2\x01'), (1, '\x00+3\x01'), True)],
+        )
+
+
 patch914575_from1 = """
    1. Beautiful is beTTer than ugly.
    2. Explicit is better than implicit.
@@ -122,17 +130,17 @@ patch914575_nonascii_to1 = """
 """
 
 patch914575_from2 = """
-\t\tLine 1: preceeded by from:[tt] to:[ssss]
-  \t\tLine 2: preceeded by from:[sstt] to:[sssst]
-  \t \tLine 3: preceeded by from:[sstst] to:[ssssss]
+\t\tLine 1: preceded by from:[tt] to:[ssss]
+  \t\tLine 2: preceded by from:[sstt] to:[sssst]
+  \t \tLine 3: preceded by from:[sstst] to:[ssssss]
 Line 4:  \thas from:[sst] to:[sss] after :
 Line 5: has from:[t] to:[ss] at end\t
 """
 
 patch914575_to2 = """
-    Line 1: preceeded by from:[tt] to:[ssss]
-    \tLine 2: preceeded by from:[sstt] to:[sssst]
-      Line 3: preceeded by from:[sstst] to:[ssssss]
+    Line 1: preceded by from:[tt] to:[ssss]
+    \tLine 2: preceded by from:[sstt] to:[sssst]
+      Line 3: preceded by from:[sstst] to:[ssssss]
 Line 4:   has from:[sst] to:[sss] after :
 Line 5: has from:[t] to:[ss] at end
 """

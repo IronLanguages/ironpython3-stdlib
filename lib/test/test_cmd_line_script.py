@@ -139,9 +139,8 @@ class CmdLineTest(unittest.TestCase):
                             expected_argv0, expected_path0,
                             expected_package, expected_loader,
                             *cmd_line_switches):
-        if not __debug__:
-            cmd_line_switches += ('-' + 'O' * sys.flags.optimize,)
-        run_args = cmd_line_switches + (script_name,) + tuple(example_args)
+        run_args = [*support.optim_args_from_interpreter_flags(),
+                    *cmd_line_switches, script_name, *example_args]
         rc, out, err = assert_python_ok(*run_args, __isolated=False)
         self._check_output(script_name, rc, out + err, expected_file,
                            expected_argv0, expected_path0,
@@ -430,7 +429,7 @@ class CmdLineTest(unittest.TestCase):
             ('builtins.x', br'Error while finding module specification.*'
                 br'AttributeError'),
             ('builtins.x.y', br'Error while finding module specification.*'
-                br'ImportError.*No module named.*not a package'),
+                br'ModuleNotFoundError.*No module named.*not a package'),
             ('os.path', br'loader.*cannot handle'),
             ('importlib', br'No module named.*'
                 br'is a package and cannot be directly executed'),

@@ -1,5 +1,7 @@
 import unittest
 from test import support
+from test.test_grammar import (VALID_UNDERSCORE_LITERALS,
+                               INVALID_UNDERSCORE_LITERALS)
 
 from random import random
 from math import atan2, isnan, copysign
@@ -343,6 +345,9 @@ class ComplexTest(unittest.TestCase):
         self.assertEqual(type(complex("1"*500)), complex)
         # check whitespace processing
         self.assertEqual(complex('\N{EM SPACE}(\N{EN SPACE}1+1j ) '), 1+1j)
+        # Invalid unicode string
+        # See bpo-34087
+        self.assertRaises(ValueError, complex, '\u3053\u3093\u306b\u3061\u306f')
 
         class EvilExc(Exception):
             pass
@@ -407,6 +412,18 @@ class ComplexTest(unittest.TestCase):
                     self.assertIs(type(z), complex2)
                     self.assertFloatsAreIdentical(z.real, x)
                     self.assertFloatsAreIdentical(z.imag, y)
+
+    def test_underscores(self):
+        # check underscores
+        for lit in VALID_UNDERSCORE_LITERALS:
+            if not any(ch in lit for ch in 'xXoObB'):
+                self.assertEqual(complex(lit), eval(lit))
+                self.assertEqual(complex(lit), complex(lit.replace('_', '')))
+        for lit in INVALID_UNDERSCORE_LITERALS:
+            if lit in ('0_7', '09_99'):  # octals are not recognized here
+                continue
+            if not any(ch in lit for ch in 'xXoObB'):
+                self.assertRaises(ValueError, complex, lit)
 
     def test_hash(self):
         for x in range(-30, 30):

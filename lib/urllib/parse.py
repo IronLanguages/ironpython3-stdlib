@@ -76,6 +76,9 @@ scheme_chars = ('abcdefghijklmnopqrstuvwxyz'
                 '0123456789'
                 '+-.')
 
+# Unsafe bytes to be removed per WHATWG spec
+_UNSAFE_URL_BYTES_TO_REMOVE = ['\t', '\r', '\n']
+
 # XXX: Consider replacing with functools.lru_cache
 MAX_CACHE_SIZE = 20
 _parse_cache = {}
@@ -155,19 +158,20 @@ class _NetlocResultMixinBase(object):
     def hostname(self):
         hostname = self._hostinfo[0]
         if not hostname:
-            hostname = None
-        elif hostname is not None:
-            hostname = hostname.lower()
-        return hostname
+            return None
+        # Scoped IPv6 address may have zone info, which must not be lowercased
+        # like http://[fe80::822a:a8ff:fe49:470c%tESt]:1234/keys
+        separator = '%' if isinstance(hostname, str) else b'%'
+        hostname, percent, zone = hostname.partition(separator)
+        return hostname.lower() + percent + zone
 
     @property
     def port(self):
         port = self._hostinfo[1]
         if port is not None:
             port = int(port, 10)
-            # Return None on an illegal port
             if not ( 0 <= port <= 65535):
-                return None
+                raise ValueError("Port out of range 0-65535")
         return port
 
 
@@ -234,8 +238,71 @@ class _NetlocResultMixinBytes(_NetlocResultMixinBase, _ResultMixinBytes):
 from collections import namedtuple
 
 _DefragResultBase = namedtuple('DefragResult', 'url fragment')
-_SplitResultBase = namedtuple('SplitResult', 'scheme netloc path query fragment')
-_ParseResultBase = namedtuple('ParseResult', 'scheme netloc path params query fragment')
+_SplitResultBase = namedtuple(
+    'SplitResult', 'scheme netloc path query fragment')
+_ParseResultBase = namedtuple(
+    'ParseResult', 'scheme netloc path params query fragment')
+
+_DefragResultBase.__doc__ = """
+DefragResult(url, fragment)
+
+A 2-tuple that contains the url without fragment identifier and the fragment
+identifier as a separate argument.
+"""
+
+_DefragResultBase.url.__doc__ = """The URL with no fragment identifier."""
+
+_DefragResultBase.fragment.__doc__ = """
+Fragment identifier separated from URL, that allows indirect identification of a
+secondary resource by reference to a primary resource and additional identifying
+information.
+"""
+
+_SplitResultBase.__doc__ = """
+SplitResult(scheme, netloc, path, query, fragment)
+
+A 5-tuple that contains the different components of a URL. Similar to
+ParseResult, but does not split params.
+"""
+
+_SplitResultBase.scheme.__doc__ = """Specifies URL scheme for the request."""
+
+_SplitResultBase.netloc.__doc__ = """
+Network location where the request is made to.
+"""
+
+_SplitResultBase.path.__doc__ = """
+The hierarchical path, such as the path to a file to download.
+"""
+
+_SplitResultBase.query.__doc__ = """
+The query component, that contains non-hierarchical data, that along with data
+in path component, identifies a resource in the scope of URI's scheme and
+network location.
+"""
+
+_SplitResultBase.fragment.__doc__ = """
+Fragment identifier, that allows indirect identification of a secondary resource
+by reference to a primary resource and additional identifying information.
+"""
+
+_ParseResultBase.__doc__ = """
+ParseResult(scheme, netloc, path, params,  query, fragment)
+
+A 6-tuple that contains components of a parsed URL.
+"""
+
+_ParseResultBase.scheme.__doc__ = _SplitResultBase.scheme.__doc__
+_ParseResultBase.netloc.__doc__ = _SplitResultBase.netloc.__doc__
+_ParseResultBase.path.__doc__ = _SplitResultBase.path.__doc__
+_ParseResultBase.params.__doc__ = """
+Parameters for last path element used to dereference the URI in order to provide
+access to perform some operation on the resource.
+"""
+
+_ParseResultBase.query.__doc__ = _SplitResultBase.query.__doc__
+_ParseResultBase.fragment.__doc__ = _SplitResultBase.fragment.__doc__
+
 
 # For backwards compatibility, alias _NetlocResultMixinStr
 # ResultBase is no longer part of the documented API, but it is
@@ -345,6 +412,11 @@ def _checknetloc(netloc):
             raise ValueError("netloc '" + netloc + "' contains invalid " +
                              "characters under NFKC normalization")
 
+def _remove_unsafe_bytes_from_url(url):
+    for b in _UNSAFE_URL_BYTES_TO_REMOVE:
+        url = url.replace(b, "")
+    return url
+
 def urlsplit(url, scheme='', allow_fragments=True):
     """Parse a URL into 5 components:
     <scheme>://<netloc>/<path>?<query>#<fragment>
@@ -352,6 +424,8 @@ def urlsplit(url, scheme='', allow_fragments=True):
     Note that we don't break the components up in smaller bits
     (e.g. netloc is a single string) and we don't expand % escapes."""
     url, scheme, _coerce_result = _coerce_args(url, scheme)
+    url = _remove_unsafe_bytes_from_url(url)
+    scheme = _remove_unsafe_bytes_from_url(scheme)
     allow_fragments = bool(allow_fragments)
     key = url, scheme, allow_fragments, type(url), type(scheme)
     cached = _parse_cache.get(key, None)
@@ -580,7 +654,7 @@ def unquote(string, encoding='utf-8', errors='replace'):
 
 
 def parse_qs(qs, keep_blank_values=False, strict_parsing=False,
-             encoding='utf-8', errors='replace'):
+             encoding='utf-8', errors='replace', max_num_fields=None, separator='&'):
     """Parse a query given as a string argument.
 
         Arguments:
@@ -601,11 +675,18 @@ def parse_qs(qs, keep_blank_values=False, strict_parsing=False,
         encoding and errors: specify how to decode percent-encoded sequences
             into Unicode characters, as accepted by the bytes.decode() method.
 
+        max_num_fields: int. If set, then throws a ValueError if there
+            are more than n fields read by parse_qsl().
+
+        separator: str. The symbol to use for separating the query arguments.
+            Defaults to &.
+
         Returns a dictionary.
     """
     parsed_result = {}
     pairs = parse_qsl(qs, keep_blank_values, strict_parsing,
-                      encoding=encoding, errors=errors)
+                      encoding=encoding, errors=errors,
+                      max_num_fields=max_num_fields, separator=separator)
     for name, value in pairs:
         if name in parsed_result:
             parsed_result[name].append(value)
@@ -615,7 +696,7 @@ def parse_qs(qs, keep_blank_values=False, strict_parsing=False,
 
 
 def parse_qsl(qs, keep_blank_values=False, strict_parsing=False,
-              encoding='utf-8', errors='replace'):
+              encoding='utf-8', errors='replace', max_num_fields=None, separator='&'):
     """Parse a query given as a string argument.
 
         Arguments:
@@ -635,10 +716,28 @@ def parse_qsl(qs, keep_blank_values=False, strict_parsing=False,
         encoding and errors: specify how to decode percent-encoded sequences
             into Unicode characters, as accepted by the bytes.decode() method.
 
+        max_num_fields: int. If set, then throws a ValueError
+            if there are more than n fields read by parse_qsl().
+
+        separator: str. The symbol to use for separating the query arguments.
+            Defaults to &.
+
         Returns a list, as G-d intended.
     """
     qs, _coerce_result = _coerce_args(qs)
-    pairs = [s2 for s1 in qs.split('&') for s2 in s1.split(';')]
+
+    if not separator or (not isinstance(separator, (str, bytes))):
+        raise ValueError("Separator must be of type string or bytes.")
+
+    # If max_num_fields is defined then check that the number of fields
+    # is less than max_num_fields. This prevents a memory exhaustion DOS
+    # attack via post bodies with many fields.
+    if max_num_fields is not None:
+        num_fields = 1 + qs.count(separator)
+        if max_num_fields < num_fields:
+            raise ValueError('Max number of fields exceeded')
+
+    pairs = [s1 for s1 in qs.split(separator)]
     r = []
     for name_value in pairs:
         if not name_value and not strict_parsing:

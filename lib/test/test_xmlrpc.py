@@ -1,5 +1,6 @@
 import base64
 import datetime
+import decimal
 import sys
 import time
 import unittest
@@ -9,7 +10,6 @@ import xmlrpc.server
 import http.client
 import http, http.server
 import socket
-import os
 import re
 import io
 import contextlib
@@ -238,6 +238,54 @@ class XMLRPCTestCase(unittest.TestCase):
                 '</struct></value></param></params>')
         self.assertRaises(ResponseError, xmlrpclib.loads, data)
 
+    def check_loads(self, s, value, **kwargs):
+        dump = '<params><param><value>%s</value></param></params>' % s
+        result, m = xmlrpclib.loads(dump, **kwargs)
+        (newvalue,) = result
+        self.assertEqual(newvalue, value)
+        self.assertIs(type(newvalue), type(value))
+        self.assertIsNone(m)
+
+    def test_load_standard_types(self):
+        check = self.check_loads
+        check('string', 'string')
+        check('<string>string</string>', 'string')
+        check('<string>𝔘𝔫𝔦𝔠𝔬𝔡𝔢 string</string>', '𝔘𝔫𝔦𝔠𝔬𝔡𝔢 string')
+        check('<int>2056183947</int>', 2056183947)
+        check('<int>-2056183947</int>', -2056183947)
+        check('<i4>2056183947</i4>', 2056183947)
+        check('<double>46093.78125</double>', 46093.78125)
+        check('<boolean>0</boolean>', False)
+        check('<base64>AGJ5dGUgc3RyaW5n/w==</base64>',
+              xmlrpclib.Binary(b'\x00byte string\xff'))
+        check('<base64>AGJ5dGUgc3RyaW5n/w==</base64>',
+              b'\x00byte string\xff', use_builtin_types=True)
+        check('<dateTime.iso8601>20050210T11:41:23</dateTime.iso8601>',
+              xmlrpclib.DateTime('20050210T11:41:23'))
+        check('<dateTime.iso8601>20050210T11:41:23</dateTime.iso8601>',
+              datetime.datetime(2005, 2, 10, 11, 41, 23),
+              use_builtin_types=True)
+        check('<array><data>'
+              '<value><int>1</int></value><value><int>2</int></value>'
+              '</data></array>', [1, 2])
+        check('<struct>'
+              '<member><name>b</name><value><int>2</int></value></member>'
+              '<member><name>a</name><value><int>1</int></value></member>'
+              '</struct>', {'a': 1, 'b': 2})
+
+    def test_load_extension_types(self):
+        check = self.check_loads
+        check('<nil/>', None)
+        check('<ex:nil/>', None)
+        check('<i1>205</i1>', 205)
+        check('<i2>20561</i2>', 20561)
+        check('<i8>9876543210</i8>', 9876543210)
+        check('<biginteger>98765432100123456789</biginteger>',
+              98765432100123456789)
+        check('<float>93.78125</float>', 93.78125)
+        check('<bigdecimal>9876543210.0123456789</bigdecimal>',
+              decimal.Decimal('9876543210.0123456789'))
+
     def test_get_host_info(self):
         # see bug #3613, this raised a TypeError
         transp = xmlrpc.client.Transport()
@@ -279,6 +327,10 @@ class XMLRPCTestCase(unittest.TestCase):
                 self.wfile.write(response)
                 self.handled = True
                 self.close_connection = False
+
+            def log_message(self, format, *args):
+                # don't clobber sys.stderr
+                pass
 
         def run_server():
             server.socket.settimeout(float(1))  # Don't hang if client fails
@@ -707,7 +759,9 @@ class BaseServerTestCase(unittest.TestCase):
         self.evt = threading.Event()
         # start server thread to handle requests
         serv_args = (self.evt, self.request_count, self.requestHandler)
-        threading.Thread(target=self.threadFunc, args=serv_args).start()
+        thread = threading.Thread(target=self.threadFunc, args=serv_args)
+        thread.start()
+        self.addCleanup(thread.join)
 
         # wait for the server to be ready
         self.evt.wait()
@@ -899,10 +953,9 @@ class SimpleServerTestCase(BaseServerTestCase):
         conn.send('POST /RPC2 HTTP/1.0\r\n'
                   'Content-Length: 100\r\n\r\n'
                   'bye HTTP/1.1\r\n'
-                  'Host: {}:{}\r\n'
+                  f'Host: {ADDR}:{PORT}\r\n'
                   'Accept-Encoding: identity\r\n'
-                  'Content-Length: 0\r\n\r\n'
-                  .format(ADDR, PORT).encode('ascii'))
+                  'Content-Length: 0\r\n\r\n'.encode('ascii'))
         conn.close()
 
     def test_context_manager(self):
@@ -1131,13 +1184,9 @@ class GzipUtilTestCase(unittest.TestCase):
 class ServerProxyTestCase(unittest.TestCase):
     def setUp(self):
         unittest.TestCase.setUp(self)
-        if threading:
-            self.url = URL
-        else:
-            # Without threading, http_server() and http_multi_server() will not
-            # be executed and URL is still equal to None. 'http://' is a just
-            # enough to choose the scheme (HTTP)
-            self.url = 'http://'
+        # Actual value of the URL doesn't matter if it is a string in
+        # the correct format.
+        self.url = 'http://fake.localhost'
 
     def test_close(self):
         p = xmlrpclib.ServerProxy(self.url)
@@ -1165,7 +1214,9 @@ class FailingServerTestCase(unittest.TestCase):
         self.evt = threading.Event()
         # start server thread to handle requests
         serv_args = (self.evt, 1)
-        threading.Thread(target=http_server, args=serv_args).start()
+        thread = threading.Thread(target=http_server, args=serv_args)
+        thread.start()
+        self.addCleanup(thread.join)
 
         # wait for the server to be ready
         self.evt.wait()
@@ -1241,7 +1292,6 @@ def captured_stdout(encoding='utf-8'):
     """A variation on support.captured_stdout() which gives a text stream
     having a `buffer` attribute.
     """
-    import io
     orig_stdout = sys.stdout
     sys.stdout = io.TextIOWrapper(io.BytesIO(), encoding=encoding)
     try:
@@ -1314,7 +1364,7 @@ class CGIHandlerTestCase(unittest.TestCase):
         content = handle[handle.find("<?xml"):]
 
         self.assertEqual(
-            int(re.search('Content-Length: (\d+)', handle).group(1)),
+            int(re.search(r'Content-Length: (\d+)', handle).group(1)),
             len(content))
 
 

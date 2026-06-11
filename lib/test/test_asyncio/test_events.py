@@ -32,27 +32,11 @@ from asyncio import proactor_events
 from asyncio import selector_events
 from asyncio import sslproto
 from asyncio import test_utils
+from asyncio.test_utils import ONLYKEY, ONLYCERT, data_file
 try:
     from test import support
 except ImportError:
     from asyncio import test_support as support
-
-
-if ssl is not None:
-    IS_OPENSSL_1_1_1 = ssl.OPENSSL_VERSION_INFO >= (1, 1, 1)
-else:
-    IS_OPENSSL_1_1_1 = False
-
-
-def data_file(filename):
-    if hasattr(support, 'TEST_HOME_DIR'):
-        fullname = os.path.join(support.TEST_HOME_DIR, filename)
-        if os.path.isfile(fullname):
-            return fullname
-    fullname = os.path.join(os.path.dirname(__file__), filename)
-    if os.path.isfile(fullname):
-        return fullname
-    raise FileNotFoundError(filename)
 
 
 def osx_tiger():
@@ -73,29 +57,25 @@ def _test_get_event_loop_new_process__sub_proc():
     return loop.run_until_complete(doit())
 
 
-ONLYCERT = data_file('ssl_cert.pem')
-ONLYKEY = data_file('ssl_key.pem')
-SIGNED_CERTFILE = data_file('keycert3.pem')
-SIGNING_CA = data_file('pycacert.pem')
-PEERCERT = {'serialNumber': 'CB2D80995A69525C',
-            'version': 3,
-            'subject': ((('countryName', 'XY'),),
-                    (('localityName', 'Castle Anthrax'),),
-                    (('organizationName', 'Python Software Foundation'),),
-                    (('commonName', 'localhost'),)),
-            'issuer': ((('countryName', 'XY'),),
-                    (('organizationName', 'Python Software Foundation CA'),),
-                    (('commonName', 'our-ca-server'),)),
-            'notAfter': 'Jul  7 14:23:16 2028 GMT',
-            'notBefore': 'Aug 29 14:23:16 2018 GMT',
-            'subjectAltName': (('DNS', 'localhost'),),
-            'OCSP': ('http://testca.pythontest.net/testca/ocsp/',),
-            'caIssuers': (
-                'http://testca.pythontest.net/testca/pycacert.cer',
-                ),
-            'crlDistributionPoints': (
-                'http://testca.pythontest.net/testca/revocation.crl',
-            )}
+SIGNED_CERTFILE = test_utils.data_file('keycert3.pem')
+SIGNING_CA = test_utils.data_file('pycacert.pem')
+PEERCERT = {
+    'OCSP': ('http://testca.pythontest.net/testca/ocsp/',),
+    'caIssuers': ('http://testca.pythontest.net/testca/pycacert.cer',),
+    'crlDistributionPoints': ('http://testca.pythontest.net/testca/revocation.crl',),
+    'issuer': ((('countryName', 'XY'),),
+            (('organizationName', 'Python Software Foundation CA'),),
+            (('commonName', 'our-ca-server'),)),
+    'notAfter': 'Jul  7 14:23:16 2028 GMT',
+    'notBefore': 'Aug 29 14:23:16 2018 GMT',
+    'serialNumber': 'CB2D80995A69525C',
+    'subject': ((('countryName', 'XY'),),
+             (('localityName', 'Castle Anthrax'),),
+             (('organizationName', 'Python Software Foundation'),),
+             (('commonName', 'localhost'),)),
+    'subjectAltName': (('DNS', 'localhost'),),
+    'version': 3
+}
 
 
 class MyBaseProto(asyncio.Protocol):
@@ -272,8 +252,8 @@ class EventLoopTestsMixin:
         if not self.loop.is_closed():
             test_utils.run_briefly(self.loop)
 
-        self.loop.close()
-        gc.collect()
+        self.doCleanups()
+        support.gc_collect()
         super().tearDown()
 
     def test_run_until_complete_nesting(self):
@@ -375,6 +355,24 @@ class EventLoopTestsMixin:
         res, thread_id = self.loop.run_until_complete(f2)
         self.assertEqual(res, 'yo')
         self.assertNotEqual(thread_id, threading.get_ident())
+
+    def test_run_in_executor_cancel(self):
+        called = False
+
+        def patched_call_soon(*args):
+            nonlocal called
+            called = True
+
+        def run():
+            time.sleep(0.05)
+
+        f2 = self.loop.run_in_executor(None, run)
+        f2.cancel()
+        self.loop.close()
+        self.loop.call_soon = patched_call_soon
+        self.loop.call_soon_threadsafe = patched_call_soon
+        time.sleep(0.4)
+        self.assertFalse(called)
 
     def test_reader_callback(self):
         r, w = test_utils.socketpair()
@@ -559,6 +557,7 @@ class EventLoopTestsMixin:
         self.loop.add_signal_handler(signal.SIGALRM, my_handler)
 
         signal.setitimer(signal.ITIMER_REAL, 0.01, 0)  # Send SIGALRM once.
+        self.loop.call_later(60, self.loop.stop)
         self.loop.run_forever()
         self.assertEqual(caught, 1)
 
@@ -571,11 +570,12 @@ class EventLoopTestsMixin:
             nonlocal caught
             caught += 1
             self.assertEqual(args, some_args)
+            self.loop.stop()
 
         self.loop.add_signal_handler(signal.SIGALRM, my_handler, *some_args)
 
         signal.setitimer(signal.ITIMER_REAL, 0.1, 0)  # Send SIGALRM once.
-        self.loop.call_later(0.5, self.loop.stop)
+        self.loop.call_later(60, self.loop.stop)
         self.loop.run_forever()
         self.assertEqual(caught, 1)
 
@@ -1159,7 +1159,6 @@ class EventLoopTestsMixin:
             self.test_create_unix_server_ssl_verify_failed()
 
     @unittest.skipIf(ssl is None, 'No ssl module')
-    @unittest.skipIf(IS_OPENSSL_1_1_1, "bpo-36576: fail on OpenSSL 1.1.1")
     def test_create_server_ssl_match_failed(self):
         proto = MyProto(loop=self.loop)
         server, host, port = self._make_ssl_server(
@@ -1184,7 +1183,11 @@ class EventLoopTestsMixin:
                     self.loop.run_until_complete(f_c)
 
         # close connection
-        proto.transport.close()
+        # transport may be None with TLS 1.3, because connection is
+        # interrupted, server is unable to send session tickets, and
+        # transport is closed.
+        if proto.transport is not None:
+            proto.transport.close()
         server.close()
 
     def test_legacy_create_server_ssl_match_failed(self):
@@ -1249,8 +1252,6 @@ class EventLoopTestsMixin:
         client.close()
         server.close()
         self.loop.run_until_complete(proto.done)
-
-    maxDiff = None
 
     def test_legacy_create_server_ssl_verified(self):
         with test_utils.force_legacy_ssl_support():
@@ -1550,6 +1551,7 @@ class EventLoopTestsMixin:
         self.assertEqual(5, proto.nbytes)
 
         os.close(slave)
+        proto.transport.close()
         self.loop.run_until_complete(proto.done)
         self.assertEqual(
             ['INITIAL', 'CONNECTED', 'EOF', 'CLOSED'], proto.state)
@@ -1997,19 +1999,26 @@ class SubprocessTestsMixin:
 
     @unittest.skipIf(sys.platform == 'win32', "Don't have SIGHUP")
     def test_subprocess_send_signal(self):
-        prog = os.path.join(os.path.dirname(__file__), 'echo.py')
+        # bpo-31034: Make sure that we get the default signal handler (killing
+        # the process). The parent process may have decided to ignore SIGHUP,
+        # and signal handlers are inherited.
+        old_handler = signal.signal(signal.SIGHUP, signal.SIG_DFL)
+        try:
+            prog = os.path.join(os.path.dirname(__file__), 'echo.py')
 
-        connect = self.loop.subprocess_exec(
-                        functools.partial(MySubprocessProtocol, self.loop),
-                        sys.executable, prog)
-        transp, proto = self.loop.run_until_complete(connect)
-        self.assertIsInstance(proto, MySubprocessProtocol)
-        self.loop.run_until_complete(proto.connected)
+            connect = self.loop.subprocess_exec(
+                            functools.partial(MySubprocessProtocol, self.loop),
+                            sys.executable, prog)
+            transp, proto = self.loop.run_until_complete(connect)
+            self.assertIsInstance(proto, MySubprocessProtocol)
+            self.loop.run_until_complete(proto.connected)
 
-        transp.send_signal(signal.SIGHUP)
-        self.loop.run_until_complete(proto.completed)
-        self.assertEqual(-signal.SIGHUP, proto.returncode)
-        transp.close()
+            transp.send_signal(signal.SIGHUP)
+            self.loop.run_until_complete(proto.completed)
+            self.assertEqual(-signal.SIGHUP, proto.returncode)
+            transp.close()
+        finally:
+            signal.signal(signal.SIGHUP, old_handler)
 
     def test_subprocess_stderr(self):
         prog = os.path.join(os.path.dirname(__file__), 'echo2.py')
@@ -2457,6 +2466,28 @@ class HandleTests(test_utils.TestCase):
         # Some coroutines might not have '__name__', such as
         # built-in async_gen.asend().
         self.assertEqual(coroutines._format_coroutine(coro), 'Coro()')
+
+        coro = Coro()
+        coro.__qualname__ = 'AAA'
+        coro.cr_code = None
+        self.assertEqual(coroutines._format_coroutine(coro), 'AAA()')
+
+        coro = Coro()
+        coro.__qualname__ = 'AAA'
+        coro.cr_code = None
+        coro.cr_frame = None
+        self.assertEqual(coroutines._format_coroutine(coro), 'AAA()')
+
+        coro = Coro()
+        coro.__qualname__ = None
+        coro.cr_code = None
+        coro.cr_frame = None
+        self.assertEqual(coroutines._format_coroutine(coro), f'{repr(coro)}()')
+
+        coro = Coro()
+        coro.cr_code = None
+        coro.cr_frame = None
+        self.assertEqual(coroutines._format_coroutine(coro), f'{repr(coro)}()')
 
 
 class TimerTests(unittest.TestCase):

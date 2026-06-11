@@ -334,7 +334,7 @@ class urlopen_HttpTests(unittest.TestCase, FakeHTTPMixin, FakeFTPMixin):
     def test_url_path_with_control_char_rejected(self):
         for char_no in list(range(0, 0x21)) + [0x7f]:
             char = chr(char_no)
-            schemeless_url = "//localhost:7777/test{}/".format(char)
+            schemeless_url = f"//localhost:7777/test{char}/"
             self.fakehttp(b"HTTP/1.1 200 OK\r\n\r\nHello.")
             try:
                 # We explicitly test urllib.request.urlopen() instead of the top
@@ -346,15 +346,13 @@ class urlopen_HttpTests(unittest.TestCase, FakeHTTPMixin, FakeFTPMixin):
                 escaped_char_repr = repr(char).replace('\\', r'\\')
                 InvalidURL = http.client.InvalidURL
                 with self.assertRaisesRegex(
-                    InvalidURL,
-                    "contain control.*{}".format(escaped_char_repr)):
-                    urllib.request.urlopen("http:{}".format(schemeless_url))
+                    InvalidURL, f"contain control.*{escaped_char_repr}"):
+                    urllib.request.urlopen(f"http:{schemeless_url}")
                 with self.assertRaisesRegex(
-                    InvalidURL,
-                    "contain control.*{}".format(escaped_char_repr)):
-                    urllib.request.urlopen("https:{}".format(schemeless_url))
+                    InvalidURL, f"contain control.*{escaped_char_repr}"):
+                    urllib.request.urlopen(f"https:{schemeless_url}")
                 # This code path quotes the URL so there is no injection.
-                resp = urlopen("http:{}".format(schemeless_url))
+                resp = urlopen(f"http:{schemeless_url}")
                 self.assertNotIn(char, resp.geturl())
             finally:
                 self.unfakehttp()
@@ -374,11 +372,11 @@ class urlopen_HttpTests(unittest.TestCase, FakeHTTPMixin, FakeFTPMixin):
             InvalidURL = http.client.InvalidURL
             with self.assertRaisesRegex(
                 InvalidURL, r"contain control.*\\r.*(found at least . .)"):
-                urllib.request.urlopen("http:{}".format(schemeless_url))
+                urllib.request.urlopen(f"http:{schemeless_url}")
             with self.assertRaisesRegex(InvalidURL, r"contain control.*\\n"):
-                urllib.request.urlopen("https:{}".format(schemeless_url))
+                urllib.request.urlopen(f"https:{schemeless_url}")
             # This code path quotes the URL so there is no injection.
-            resp = urlopen("http:{}".format(schemeless_url))
+            resp = urlopen(f"http:{schemeless_url}")
             self.assertNotIn(' ', resp.geturl())
             self.assertNotIn('\r', resp.geturl())
             self.assertNotIn('\n', resp.geturl())
@@ -389,16 +387,16 @@ class urlopen_HttpTests(unittest.TestCase, FakeHTTPMixin, FakeFTPMixin):
     def test_url_host_with_control_char_rejected(self):
         for char_no in list(range(0, 0x21)) + [0x7f]:
             char = chr(char_no)
-            schemeless_url = "//localhost{}/test/".format(char)
+            schemeless_url = f"//localhost{char}/test/"
             self.fakehttp(b"HTTP/1.1 200 OK\r\n\r\nHello.")
             try:
                 escaped_char_repr = repr(char).replace('\\', r'\\')
                 InvalidURL = http.client.InvalidURL
                 with self.assertRaisesRegex(
-                    InvalidURL, r"contain control.*{}".format(escaped_char_repr)):
-                    urlopen("http:{}".format(schemeless_url))
-                with self.assertRaisesRegex(InvalidURL, r"contain control.*{}".format(escaped_char_repr)):
-                    urlopen("http:{}".format(schemeless_url))
+                    InvalidURL, f"contain control.*{escaped_char_repr}"):
+                    urlopen(f"http:{schemeless_url}")
+                with self.assertRaisesRegex(InvalidURL, f"contain control.*{escaped_char_repr}"):
+                    urlopen(f"https:{schemeless_url}")
             finally:
                 self.unfakehttp()
 
@@ -411,9 +409,9 @@ class urlopen_HttpTests(unittest.TestCase, FakeHTTPMixin, FakeFTPMixin):
             InvalidURL = http.client.InvalidURL
             with self.assertRaisesRegex(
                 InvalidURL, r"contain control.*\\r"):
-                urlopen("http:{}".format(schemeless_url))
+                urlopen(f"http:{schemeless_url}")
             with self.assertRaisesRegex(InvalidURL, r"contain control.*\\n"):
-                urlopen("http:{}".format(schemeless_url))
+                urlopen(f"https:{schemeless_url}")
         finally:
             self.unfakehttp()
 
@@ -560,10 +558,11 @@ Connection: close
     @unittest.skipUnless(ssl, "ssl module required")
     def test_cafile_and_context(self):
         context = ssl.create_default_context()
-        with self.assertRaises(ValueError):
-            urllib.request.urlopen(
-                "https://localhost", cafile="/nonexistent/path", context=context
-            )
+        with support.check_warnings(('', DeprecationWarning)):
+            with self.assertRaises(ValueError):
+                urllib.request.urlopen(
+                    "https://localhost", cafile="/nonexistent/path", context=context
+                )
 
 
 class urlopen_DataTests(unittest.TestCase):
@@ -822,7 +821,7 @@ FF
 
 
 class QuotingTests(unittest.TestCase):
-    """Tests for urllib.quote() and urllib.quote_plus()
+    r"""Tests for urllib.quote() and urllib.quote_plus()
 
     According to RFC 2396 (Uniform Resource Identifiers), to escape a
     character you write it as '%' + <2 character US-ASCII hex value>.
@@ -897,7 +896,7 @@ class QuotingTests(unittest.TestCase):
         # Make sure all characters that should be quoted are by default sans
         # space (separate test for that).
         should_quote = [chr(num) for num in range(32)] # For 0x00 - 0x1F
-        should_quote.append('<>#%"{}|\^[]`')
+        should_quote.append(r'<>#%"{}|\^[]`')
         should_quote.append(chr(127)) # For 0x7F
         should_quote = ''.join(should_quote)
         for char in should_quote:

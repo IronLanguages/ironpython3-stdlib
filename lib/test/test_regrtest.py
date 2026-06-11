@@ -4,7 +4,9 @@ Tests of regrtest.py.
 Note: test_regrtest cannot be run twice in parallel.
 """
 
+import contextlib
 import faulthandler
+import io
 import os.path
 import platform
 import re
@@ -14,8 +16,9 @@ import sysconfig
 import tempfile
 import textwrap
 import unittest
-from test import regrtest
+from test import libregrtest
 from test import support
+from test.libregrtest import utils
 
 
 Py_DEBUG = hasattr(sys, 'getobjects')
@@ -34,12 +37,13 @@ TEST_INTERRUPTED = textwrap.dedent("""
 
 
 class ParseArgsTestCase(unittest.TestCase):
-
-    """Test regrtest's argument parsing."""
+    """
+    Test regrtest's argument parsing, function _parse_args().
+    """
 
     def checkError(self, args, msg):
         with support.captured_stderr() as err, self.assertRaises(SystemExit):
-            regrtest._parse_args(args)
+            libregrtest._parse_args(args)
         self.assertIn(msg, err.getvalue())
 
     def test_help(self):
@@ -47,78 +51,81 @@ class ParseArgsTestCase(unittest.TestCase):
             with self.subTest(opt=opt):
                 with support.captured_stdout() as out, \
                      self.assertRaises(SystemExit):
-                    regrtest._parse_args([opt])
+                    libregrtest._parse_args([opt])
                 self.assertIn('Run Python regression tests.', out.getvalue())
 
     @unittest.skipUnless(hasattr(faulthandler, 'dump_traceback_later'),
                          "faulthandler.dump_traceback_later() required")
     def test_timeout(self):
-        ns = regrtest._parse_args(['--timeout', '4.2'])
+        ns = libregrtest._parse_args(['--timeout', '4.2'])
         self.assertEqual(ns.timeout, 4.2)
         self.checkError(['--timeout'], 'expected one argument')
         self.checkError(['--timeout', 'foo'], 'invalid float value')
 
     def test_wait(self):
-        ns = regrtest._parse_args(['--wait'])
+        ns = libregrtest._parse_args(['--wait'])
         self.assertTrue(ns.wait)
 
-    def test_slaveargs(self):
-        ns = regrtest._parse_args(['--slaveargs', '[[], {}]'])
-        self.assertEqual(ns.slaveargs, '[[], {}]')
-        self.checkError(['--slaveargs'], 'expected one argument')
+    def test_worker_args(self):
+        ns = libregrtest._parse_args(['--worker-args', '[[], {}]'])
+        self.assertEqual(ns.worker_args, '[[], {}]')
+        self.checkError(['--worker-args'], 'expected one argument')
 
     def test_start(self):
         for opt in '-S', '--start':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt, 'foo'])
+                ns = libregrtest._parse_args([opt, 'foo'])
                 self.assertEqual(ns.start, 'foo')
                 self.checkError([opt], 'expected one argument')
 
     def test_verbose(self):
-        ns = regrtest._parse_args(['-v'])
+        ns = libregrtest._parse_args(['-v'])
         self.assertEqual(ns.verbose, 1)
-        ns = regrtest._parse_args(['-vvv'])
+        ns = libregrtest._parse_args(['-vvv'])
         self.assertEqual(ns.verbose, 3)
-        ns = regrtest._parse_args(['--verbose'])
+        ns = libregrtest._parse_args(['--verbose'])
         self.assertEqual(ns.verbose, 1)
-        ns = regrtest._parse_args(['--verbose'] * 3)
+        ns = libregrtest._parse_args(['--verbose'] * 3)
         self.assertEqual(ns.verbose, 3)
-        ns = regrtest._parse_args([])
+        ns = libregrtest._parse_args([])
         self.assertEqual(ns.verbose, 0)
 
     def test_verbose2(self):
         for opt in '-w', '--verbose2':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt])
+                ns = libregrtest._parse_args([opt])
                 self.assertTrue(ns.verbose2)
 
     def test_verbose3(self):
         for opt in '-W', '--verbose3':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt])
+                ns = libregrtest._parse_args([opt])
                 self.assertTrue(ns.verbose3)
 
     def test_quiet(self):
         for opt in '-q', '--quiet':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt])
+                ns = libregrtest._parse_args([opt])
                 self.assertTrue(ns.quiet)
                 self.assertEqual(ns.verbose, 0)
 
     def test_slow(self):
         for opt in '-o', '--slowest':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt])
+                ns = libregrtest._parse_args([opt])
                 self.assertTrue(ns.print_slow)
 
     def test_header(self):
-        ns = regrtest._parse_args(['--header'])
+        ns = libregrtest._parse_args(['--header'])
+        self.assertTrue(ns.header)
+
+        ns = libregrtest._parse_args(['--verbose'])
         self.assertTrue(ns.header)
 
     def test_randomize(self):
         for opt in '-r', '--randomize':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt])
+                ns = libregrtest._parse_args([opt])
                 self.assertTrue(ns.randomize)
 
     def test_randseed(self):
@@ -131,39 +138,32 @@ class ParseArgsTestCase(unittest.TestCase):
     def test_fromfile(self):
         for opt in '-f', '--fromfile':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt, 'foo'])
+                ns = libregrtest._parse_args([opt, 'foo'])
                 self.assertEqual(ns.fromfile, 'foo')
                 self.checkError([opt], 'expected one argument')
                 self.checkError([opt, 'foo', '-s'], "don't go together")
 
-    def test_randseed(self):
-        ns = regrtest._parse_args(['--randseed', '12345'])
-        self.assertEqual(ns.random_seed, 12345)
-        self.assertTrue(ns.randomize)
-        self.checkError(['--randseed'], 'expected one argument')
-        self.checkError(['--randseed', 'foo'], 'invalid int value')
-
     def test_exclude(self):
         for opt in '-x', '--exclude':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt])
+                ns = libregrtest._parse_args([opt])
                 self.assertTrue(ns.exclude)
 
     def test_single(self):
         for opt in '-s', '--single':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt])
+                ns = libregrtest._parse_args([opt])
                 self.assertTrue(ns.single)
                 self.checkError([opt, '-f', 'foo'], "don't go together")
 
     def test_match(self):
         for opt in '-m', '--match':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt, 'pattern'])
+                ns = libregrtest._parse_args([opt, 'pattern'])
                 self.assertEqual(ns.match_tests, ['pattern'])
                 self.checkError([opt], 'expected one argument')
 
-        ns = regrtest._parse_args(['-m', 'pattern1',
+        ns = libregrtest._parse_args(['-m', 'pattern1',
                                       '-m', 'pattern2'])
         self.assertEqual(ns.match_tests, ['pattern1', 'pattern2'])
 
@@ -173,7 +173,7 @@ class ParseArgsTestCase(unittest.TestCase):
             print('matchfile2', file=fp)
 
         filename = os.path.abspath(support.TESTFN)
-        ns = regrtest._parse_args(['-m', 'match',
+        ns = libregrtest._parse_args(['-m', 'match',
                                       '--matchfile', filename])
         self.assertEqual(ns.match_tests,
                          ['match', 'matchfile1', 'matchfile2'])
@@ -181,65 +181,65 @@ class ParseArgsTestCase(unittest.TestCase):
     def test_failfast(self):
         for opt in '-G', '--failfast':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt, '-v'])
+                ns = libregrtest._parse_args([opt, '-v'])
                 self.assertTrue(ns.failfast)
-                ns = regrtest._parse_args([opt, '-W'])
+                ns = libregrtest._parse_args([opt, '-W'])
                 self.assertTrue(ns.failfast)
                 self.checkError([opt], '-G/--failfast needs either -v or -W')
 
     def test_use(self):
         for opt in '-u', '--use':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt, 'gui,network'])
+                ns = libregrtest._parse_args([opt, 'gui,network'])
                 self.assertEqual(ns.use_resources, ['gui', 'network'])
 
-                ns = regrtest._parse_args([opt, 'gui,none,network'])
+                ns = libregrtest._parse_args([opt, 'gui,none,network'])
                 self.assertEqual(ns.use_resources, ['network'])
 
-                expected = list(regrtest.ALL_RESOURCES)
+                expected = list(libregrtest.ALL_RESOURCES)
                 expected.remove('gui')
-                ns = regrtest._parse_args([opt, 'all,-gui'])
+                ns = libregrtest._parse_args([opt, 'all,-gui'])
                 self.assertEqual(ns.use_resources, expected)
                 self.checkError([opt], 'expected one argument')
                 self.checkError([opt, 'foo'], 'invalid resource')
 
                 # all + a resource not part of "all"
-                ns = regrtest._parse_args([opt, 'all,extralargefile'])
+                ns = libregrtest._parse_args([opt, 'all,tzdata'])
                 self.assertEqual(ns.use_resources,
-                                 list(regrtest.ALL_RESOURCES) + ['extralargefile'])
+                                 list(libregrtest.ALL_RESOURCES) + ['tzdata'])
 
                 # test another resource which is not part of "all"
-                ns = regrtest._parse_args([opt, 'extralargefile'])
+                ns = libregrtest._parse_args([opt, 'extralargefile'])
                 self.assertEqual(ns.use_resources, ['extralargefile'])
 
     def test_memlimit(self):
         for opt in '-M', '--memlimit':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt, '4G'])
+                ns = libregrtest._parse_args([opt, '4G'])
                 self.assertEqual(ns.memlimit, '4G')
                 self.checkError([opt], 'expected one argument')
 
     def test_testdir(self):
-        ns = regrtest._parse_args(['--testdir', 'foo'])
+        ns = libregrtest._parse_args(['--testdir', 'foo'])
         self.assertEqual(ns.testdir, os.path.join(support.SAVEDCWD, 'foo'))
         self.checkError(['--testdir'], 'expected one argument')
 
     def test_runleaks(self):
         for opt in '-L', '--runleaks':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt])
+                ns = libregrtest._parse_args([opt])
                 self.assertTrue(ns.runleaks)
 
     def test_huntrleaks(self):
         for opt in '-R', '--huntrleaks':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt, ':'])
+                ns = libregrtest._parse_args([opt, ':'])
                 self.assertEqual(ns.huntrleaks, (5, 4, 'reflog.txt'))
-                ns = regrtest._parse_args([opt, '6:'])
+                ns = libregrtest._parse_args([opt, '6:'])
                 self.assertEqual(ns.huntrleaks, (6, 4, 'reflog.txt'))
-                ns = regrtest._parse_args([opt, ':3'])
+                ns = libregrtest._parse_args([opt, ':3'])
                 self.assertEqual(ns.huntrleaks, (5, 3, 'reflog.txt'))
-                ns = regrtest._parse_args([opt, '6:3:leaks.log'])
+                ns = libregrtest._parse_args([opt, '6:3:leaks.log'])
                 self.assertEqual(ns.huntrleaks, (6, 3, 'leaks.log'))
                 self.checkError([opt], 'expected one argument')
                 self.checkError([opt, '6'],
@@ -250,27 +250,25 @@ class ParseArgsTestCase(unittest.TestCase):
     def test_multiprocess(self):
         for opt in '-j', '--multiprocess':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt, '2'])
+                ns = libregrtest._parse_args([opt, '2'])
                 self.assertEqual(ns.use_mp, 2)
                 self.checkError([opt], 'expected one argument')
                 self.checkError([opt, 'foo'], 'invalid int value')
                 self.checkError([opt, '2', '-T'], "don't go together")
                 self.checkError([opt, '2', '-l'], "don't go together")
-                self.checkError([opt, '2', '-M', '4G'], "don't go together")
                 self.checkError([opt, '0', '-T'], "don't go together")
                 self.checkError([opt, '0', '-l'], "don't go together")
-                self.checkError([opt, '0', '-M', '4G'], "don't go together")
 
     def test_coverage(self):
         for opt in '-T', '--coverage':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt])
+                ns = libregrtest._parse_args([opt])
                 self.assertTrue(ns.trace)
 
     def test_coverdir(self):
         for opt in '-D', '--coverdir':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt, 'foo'])
+                ns = libregrtest._parse_args([opt, 'foo'])
                 self.assertEqual(ns.coverdir,
                                  os.path.join(support.SAVEDCWD, 'foo'))
                 self.checkError([opt], 'expected one argument')
@@ -278,13 +276,13 @@ class ParseArgsTestCase(unittest.TestCase):
     def test_nocoverdir(self):
         for opt in '-N', '--nocoverdir':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt])
+                ns = libregrtest._parse_args([opt])
                 self.assertIsNone(ns.coverdir)
 
     def test_threshold(self):
         for opt in '-t', '--threshold':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt, '1000'])
+                ns = libregrtest._parse_args([opt, '1000'])
                 self.assertEqual(ns.threshold, 1000)
                 self.checkError([opt], 'expected one argument')
                 self.checkError([opt, 'foo'], 'invalid int value')
@@ -292,45 +290,48 @@ class ParseArgsTestCase(unittest.TestCase):
     def test_nowindows(self):
         for opt in '-n', '--nowindows':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt])
+                with contextlib.redirect_stderr(io.StringIO()) as stderr:
+                    ns = libregrtest._parse_args([opt])
                 self.assertTrue(ns.nowindows)
+                err = stderr.getvalue()
+                self.assertIn('the --nowindows (-n) option is deprecated', err)
 
     def test_forever(self):
         for opt in '-F', '--forever':
             with self.subTest(opt=opt):
-                ns = regrtest._parse_args([opt])
+                ns = libregrtest._parse_args([opt])
                 self.assertTrue(ns.forever)
 
     def test_unrecognized_argument(self):
         self.checkError(['--xxx'], 'usage:')
 
     def test_long_option__partial(self):
-        ns = regrtest._parse_args(['--qui'])
+        ns = libregrtest._parse_args(['--qui'])
         self.assertTrue(ns.quiet)
         self.assertEqual(ns.verbose, 0)
 
     def test_two_options(self):
-        ns = regrtest._parse_args(['--quiet', '--exclude'])
+        ns = libregrtest._parse_args(['--quiet', '--exclude'])
         self.assertTrue(ns.quiet)
         self.assertEqual(ns.verbose, 0)
         self.assertTrue(ns.exclude)
 
     def test_option_with_empty_string_value(self):
-        ns = regrtest._parse_args(['--start', ''])
+        ns = libregrtest._parse_args(['--start', ''])
         self.assertEqual(ns.start, '')
 
     def test_arg(self):
-        ns = regrtest._parse_args(['foo'])
+        ns = libregrtest._parse_args(['foo'])
         self.assertEqual(ns.args, ['foo'])
 
     def test_option_and_arg(self):
-        ns = regrtest._parse_args(['--quiet', 'foo'])
+        ns = libregrtest._parse_args(['--quiet', 'foo'])
         self.assertTrue(ns.quiet)
         self.assertEqual(ns.verbose, 0)
         self.assertEqual(ns.args, ['foo'])
 
     def test_arg_option_arg(self):
-        ns = regrtest._parse_args(['test_unaryop', '-v', 'test_binop'])
+        ns = libregrtest._parse_args(['test_unaryop', '-v', 'test_binop'])
         self.assertEqual(ns.verbose, 1)
         self.assertEqual(ns.args, ['test_unaryop', 'test_binop'])
 
@@ -350,10 +351,19 @@ class BaseTestCase(unittest.TestCase):
         self.tmptestdir = tempfile.mkdtemp()
         self.addCleanup(support.rmtree, self.tmptestdir)
 
-    def create_test(self, name=None, code=''):
+    def create_test(self, name=None, code=None):
         if not name:
             name = 'noop%s' % BaseTestCase.TEST_UNIQUE_ID
             BaseTestCase.TEST_UNIQUE_ID += 1
+
+        if code is None:
+            code = textwrap.dedent("""
+                    import unittest
+
+                    class Tests(unittest.TestCase):
+                        def test_empty_test(self):
+                            pass
+                """)
 
         # test_regrtest cannot be run twice in parallel because
         # of setUp() and create_test()
@@ -389,6 +399,7 @@ class BaseTestCase(unittest.TestCase):
 
     def check_executed_tests(self, output, tests, skipped=(), failed=(),
                              env_changed=(), omitted=(),
+                             rerun=(), no_test_ran=(),
                              randomize=False, interrupted=False,
                              fail_env_changed=False):
         if isinstance(tests, str):
@@ -401,6 +412,10 @@ class BaseTestCase(unittest.TestCase):
             env_changed = [env_changed]
         if isinstance(omitted, str):
             omitted = [omitted]
+        if isinstance(rerun, str):
+            rerun = [rerun]
+        if isinstance(no_test_ran, str):
+            no_test_ran = [no_test_ran]
 
         executed = self.parse_executed_tests(output)
         if randomize:
@@ -435,8 +450,20 @@ class BaseTestCase(unittest.TestCase):
             regex = list_regex('%s test%s omitted', omitted)
             self.check_line(output, regex)
 
+        if rerun:
+            regex = list_regex('%s re-run test%s', rerun)
+            self.check_line(output, regex)
+            self.check_line(output, "Re-running failed tests in verbose mode")
+            for name in rerun:
+                regex = "Re-running test %r in verbose mode" % name
+                self.check_line(output, regex)
+
+        if no_test_ran:
+            regex = list_regex('%s test%s run no tests', no_test_ran)
+            self.check_line(output, regex)
+
         good = (len(tests) - len(skipped) - len(failed)
-                - len(omitted) - len(env_changed))
+                - len(omitted) - len(env_changed) - len(no_test_ran))
         if good:
             regex = r'%s test%s OK\.$' % (good, plural(good))
             if not skipped and not failed and good > 1:
@@ -446,14 +473,23 @@ class BaseTestCase(unittest.TestCase):
         if interrupted:
             self.check_line(output, 'Test suite interrupted by signal SIGINT.')
 
+        result = []
         if failed:
-            result = 'FAILURE'
-        elif interrupted:
-            result = 'INTERRUPTED'
+            result.append('FAILURE')
         elif fail_env_changed and env_changed:
-            result = 'ENV CHANGED'
-        else:
-            result = 'SUCCESS'
+            result.append('ENV CHANGED')
+        if interrupted:
+            result.append('INTERRUPTED')
+        if not any((good, result, failed, interrupted, skipped,
+                    env_changed, fail_env_changed)):
+            result.append("NO TEST RUN")
+        elif not result:
+            result.append('SUCCESS')
+        result = ', '.join(result)
+        if rerun:
+            self.check_line(output, 'Tests result: %s' % result)
+            result = 'FAILURE then %s' % result
+
         self.check_line(output, 'Tests result: %s' % result)
 
     def parse_random_seed(self, output):
@@ -593,6 +629,8 @@ class ProgramsTestCase(BaseTestCase):
     def test_pcbuild_rt(self):
         # PCbuild\rt.bat
         script = os.path.join(ROOT_DIR, r'PCbuild\rt.bat')
+        if not os.path.isfile(script):
+            self.skipTest(f'File "{script}" does not exist')
         rt_args = ["-q"]             # Quick, don't run tests twice
         if platform.architecture()[0] == '64bit':
             rt_args.append('-x64')   # 64-bit build
@@ -630,7 +668,14 @@ class ArgsTestCase(BaseTestCase):
         # test -u command line option
         tests = {}
         for resource in ('audio', 'network'):
-            code = 'from test import support\nsupport.requires(%r)' % resource
+            code = textwrap.dedent("""
+                        from test import support; support.requires(%r)
+                        import unittest
+                        class PassingTest(unittest.TestCase):
+                            def test_pass(self):
+                                pass
+                    """ % resource)
+
             tests[resource] = self.create_test(resource, code)
         test_names = sorted(tests.values())
 
@@ -828,6 +873,20 @@ class ArgsTestCase(BaseTestCase):
         """)
         self.check_leak(code, 'references')
 
+    @unittest.skipUnless(Py_DEBUG, 'need a debug build')
+    def test_huntrleaks_fd_leak(self):
+        # test --huntrleaks for file descriptor leak
+        code = textwrap.dedent("""
+            import os
+            import unittest
+
+            class FDLeakTest(unittest.TestCase):
+                def test_leak(self):
+                    fd = os.open(__file__, os.O_RDONLY)
+                    # bug: never close the file descriptor
+        """)
+        self.check_leak(code, 'file descriptors')
+
     def test_list_tests(self):
         # test --list-tests
         tests = [self.create_test() for i in range(5)]
@@ -935,6 +994,95 @@ class ArgsTestCase(BaseTestCase):
         output = self.run_tests("--fail-env-changed", testname, exitcode=3)
         self.check_executed_tests(output, [testname], env_changed=testname,
                                   fail_env_changed=True)
+
+    def test_rerun_fail(self):
+        code = textwrap.dedent("""
+            import unittest
+
+            class Tests(unittest.TestCase):
+                def test_bug(self):
+                    # test always fail
+                    self.fail("bug")
+        """)
+        testname = self.create_test(code=code)
+
+        output = self.run_tests("-w", testname, exitcode=2)
+        self.check_executed_tests(output, [testname],
+                                  failed=testname, rerun=testname)
+    def test_no_tests_ran(self):
+        code = textwrap.dedent("""
+            import unittest
+
+            class Tests(unittest.TestCase):
+                def test_bug(self):
+                    pass
+        """)
+        testname = self.create_test(code=code)
+
+        output = self.run_tests(testname, "-m", "nosuchtest", exitcode=0)
+        self.check_executed_tests(output, [testname], no_test_ran=testname)
+
+    def test_no_tests_ran_multiple_tests_nonexistent(self):
+        code = textwrap.dedent("""
+            import unittest
+
+            class Tests(unittest.TestCase):
+                def test_bug(self):
+                    pass
+        """)
+        testname = self.create_test(code=code)
+        testname2 = self.create_test(code=code)
+
+        output = self.run_tests(testname, testname2, "-m", "nosuchtest", exitcode=0)
+        self.check_executed_tests(output, [testname, testname2],
+                                  no_test_ran=[testname, testname2])
+
+    def test_no_test_ran_some_test_exist_some_not(self):
+        code = textwrap.dedent("""
+            import unittest
+
+            class Tests(unittest.TestCase):
+                def test_bug(self):
+                    pass
+        """)
+        testname = self.create_test(code=code)
+        other_code = textwrap.dedent("""
+            import unittest
+
+            class Tests(unittest.TestCase):
+                def test_other_bug(self):
+                    pass
+        """)
+        testname2 = self.create_test(code=other_code)
+
+        output = self.run_tests(testname, testname2, "-m", "nosuchtest",
+                                "-m", "test_other_bug", exitcode=0)
+        self.check_executed_tests(output, [testname, testname2],
+                                  no_test_ran=[testname])
+
+
+class TestUtils(unittest.TestCase):
+    def test_format_duration(self):
+        self.assertEqual(utils.format_duration(0),
+                         '0 ms')
+        self.assertEqual(utils.format_duration(1e-9),
+                         '1 ms')
+        self.assertEqual(utils.format_duration(10e-3),
+                         '10 ms')
+        self.assertEqual(utils.format_duration(1.5),
+                         '1 sec 500 ms')
+        self.assertEqual(utils.format_duration(1),
+                         '1 sec')
+        self.assertEqual(utils.format_duration(2 * 60),
+                         '2 min')
+        self.assertEqual(utils.format_duration(2 * 60 + 1),
+                         '2 min 1 sec')
+        self.assertEqual(utils.format_duration(3 * 3600),
+                         '3 hour')
+        self.assertEqual(utils.format_duration(3 * 3600  + 2 * 60 + 1),
+                         '3 hour 2 min')
+        self.assertEqual(utils.format_duration(3 * 3600 + 1),
+                         '3 hour 1 sec')
 
 
 if __name__ == '__main__':

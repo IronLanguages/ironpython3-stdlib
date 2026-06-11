@@ -94,6 +94,10 @@ class DummyFTPHandler(asynchat.async_chat):
         self.rest = None
         self.next_retr_data = RETR_DATA
         self.push('220 welcome')
+        # We use this as the string IPv4 address to direct the client
+        # to in response to a PASV command.  To test security behavior.
+        # https://bugs.python.org/issue43285/.
+        self.fake_pasv_server_ip = '252.253.254.255'
 
     def collect_incoming_data(self, data):
         self.in_buffer.append(data)
@@ -136,7 +140,8 @@ class DummyFTPHandler(asynchat.async_chat):
             sock.bind((self.socket.getsockname()[0], 0))
             sock.listen()
             sock.settimeout(TIMEOUT)
-            ip, port = sock.getsockname()[:2]
+            port = sock.getsockname()[1]
+            ip = self.fake_pasv_server_ip
             ip = ip.replace('.', ','); p1 = port / 256; p2 = port % 256
             self.push('227 entering passive mode (%s,%d,%d)' %(ip, p1, p2))
             conn, addr = sock.accept()
@@ -311,10 +316,12 @@ if ssl is not None:
         _ssl_closing = False
 
         def secure_connection(self):
-            socket = ssl.wrap_socket(self.socket, suppress_ragged_eofs=False,
-                                     certfile=CERTFILE, server_side=True,
-                                     do_handshake_on_connect=False,
-                                     ssl_version=ssl.PROTOCOL_SSLv23)
+            context = ssl.SSLContext()
+            context.load_cert_chain(CERTFILE)
+            socket = context.wrap_socket(self.socket,
+                                         suppress_ragged_eofs=False,
+                                         server_side=True,
+                                         do_handshake_on_connect=False)
             self.del_channel()
             self.set_socket(socket)
             self._ssl_accepting = True
@@ -468,6 +475,9 @@ class TestFTPClass(TestCase):
     def tearDown(self):
         self.client.close()
         self.server.stop()
+        # Explicitly clear the attribute to prevent dangling thread
+        self.server = None
+        asyncore.close_all(ignore_all=True)
 
     def check_data(self, received, expected):
         self.assertEqual(len(received), len(expected))
@@ -689,6 +699,26 @@ class TestFTPClass(TestCase):
         # IPv4 is in use, just make sure send_epsv has not been used
         self.assertEqual(self.server.handler_instance.last_received_cmd, 'pasv')
 
+    def test_makepasv_issue43285_security_disabled(self):
+        """Test the opt-in to the old vulnerable behavior."""
+        self.client.trust_server_pasv_ipv4_address = True
+        bad_host, port = self.client.makepasv()
+        self.assertEqual(
+                bad_host, self.server.handler_instance.fake_pasv_server_ip)
+        # Opening and closing a connection keeps the dummy server happy
+        # instead of timing out on accept.
+        socket.create_connection((self.client.sock.getpeername()[0], port),
+                                 timeout=TIMEOUT).close()
+
+    def test_makepasv_issue43285_security_enabled_default(self):
+        self.assertFalse(self.client.trust_server_pasv_ipv4_address)
+        trusted_host, port = self.client.makepasv()
+        self.assertNotEqual(
+                trusted_host, self.server.handler_instance.fake_pasv_server_ip)
+        # Opening and closing a connection keeps the dummy server happy
+        # instead of timing out on accept.
+        socket.create_connection((trusted_host, port), timeout=TIMEOUT).close()
+
     def test_with_statement(self):
         self.client.quit()
 
@@ -797,6 +827,9 @@ class TestIPv6Environment(TestCase):
     def tearDown(self):
         self.client.close()
         self.server.stop()
+        # Explicitly clear the attribute to prevent dangling thread
+        self.server = None
+        asyncore.close_all(ignore_all=True)
 
     def test_af(self):
         self.assertEqual(self.client.af, socket.AF_INET6)
@@ -855,6 +888,9 @@ class TestTLS_FTPClass(TestCase):
     def tearDown(self):
         self.client.close()
         self.server.stop()
+        # Explicitly clear the attribute to prevent dangling thread
+        self.server = None
+        asyncore.close_all(ignore_all=True)
 
     def test_control_connection(self):
         self.assertNotIsInstance(self.client.sock, ssl.SSLSocket)
@@ -865,18 +901,23 @@ class TestTLS_FTPClass(TestCase):
         # clear text
         with self.client.transfercmd('list') as sock:
             self.assertNotIsInstance(sock, ssl.SSLSocket)
+            self.assertEqual(sock.recv(1024), LIST_DATA.encode('ascii'))
         self.assertEqual(self.client.voidresp(), "226 transfer complete")
 
         # secured, after PROT P
         self.client.prot_p()
         with self.client.transfercmd('list') as sock:
             self.assertIsInstance(sock, ssl.SSLSocket)
+            # consume from SSL socket to finalize handshake and avoid
+            # "SSLError [SSL] shutdown while in init"
+            self.assertEqual(sock.recv(1024), LIST_DATA.encode('ascii'))
         self.assertEqual(self.client.voidresp(), "226 transfer complete")
 
         # PROT C is issued, the connection must be in cleartext again
         self.client.prot_c()
         with self.client.transfercmd('list') as sock:
             self.assertNotIsInstance(sock, ssl.SSLSocket)
+            self.assertEqual(sock.recv(1024), LIST_DATA.encode('ascii'))
         self.assertEqual(self.client.voidresp(), "226 transfer complete")
 
     def test_login(self):
@@ -897,11 +938,11 @@ class TestTLS_FTPClass(TestCase):
             self.client.auth()
             self.assertRaises(ValueError, self.client.auth)
         finally:
-            self.client.ssl_version = ssl.PROTOCOL_TLSv1
+            self.client.ssl_version = ssl.PROTOCOL_TLS
 
     def test_context(self):
         self.client.quit()
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS)
         self.assertRaises(ValueError, ftplib.FTP_TLS, keyfile=CERTFILE,
                           context=ctx)
         self.assertRaises(ValueError, ftplib.FTP_TLS, certfile=CERTFILE,
@@ -930,7 +971,7 @@ class TestTLS_FTPClass(TestCase):
 
     def test_check_hostname(self):
         self.client.quit()
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS)
         ctx.verify_mode = ssl.CERT_REQUIRED
         ctx.check_hostname = True
         ctx.load_verify_locations(CAFILE)
@@ -977,6 +1018,8 @@ class TestTimeouts(TestCase):
     def tearDown(self):
         ftplib.FTP.port = self.old_port
         self.server_thread.join()
+        # Explicitly clear the attribute to prevent dangling thread
+        self.server_thread = None
 
     def server(self):
         # This method sets the evt 3 times:
@@ -1053,10 +1096,19 @@ class TestTimeouts(TestCase):
         ftp.close()
 
 
+class MiscTestCase(TestCase):
+    def test__all__(self):
+        blacklist = {'MSG_OOB', 'FTP_PORT', 'MAXLINE', 'CRLF', 'B_CRLF',
+                     'Error', 'parse150', 'parse227', 'parse229', 'parse257',
+                     'print_line', 'ftpcp', 'test'}
+        support.check__all__(self, ftplib, blacklist=blacklist)
+
+
 def test_main():
     tests = [TestFTPClass, TestTimeouts,
              TestIPv6Environment,
-             TestTLS_FTPClassMixin, TestTLS_FTPClass]
+             TestTLS_FTPClassMixin, TestTLS_FTPClass,
+             MiscTestCase]
 
     thread_info = support.threading_setup()
     try:

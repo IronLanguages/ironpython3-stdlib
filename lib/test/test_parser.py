@@ -2,7 +2,6 @@ import copy
 import parser
 import pickle
 import unittest
-import sys
 import operator
 import struct
 from test import support
@@ -31,7 +30,7 @@ class RoundtripLegalSyntaxTestCase(unittest.TestCase):
         self.roundtrip(parser.expr, s)
 
     def test_flags_passed(self):
-        # The unicode literals flags has to be passed from the paser to AST
+        # The unicode literals flags has to be passed from the parser to AST
         # generation.
         suite = parser.suite("from __future__ import unicode_literals; x = ''")
         code = suite.compile()
@@ -140,6 +139,45 @@ class RoundtripLegalSyntaxTestCase(unittest.TestCase):
     def test_simple_assignments(self):
         self.check_suite("a = b")
         self.check_suite("a = b = c = d = e")
+
+    def test_var_annot(self):
+        self.check_suite("x: int = 5")
+        self.check_suite("y: List[T] = []; z: [list] = fun()")
+        self.check_suite("x: tuple = (1, 2)")
+        self.check_suite("d[f()]: int = 42")
+        self.check_suite("f(d[x]): str = 'abc'")
+        self.check_suite("x.y.z.w: complex = 42j")
+        self.check_suite("x: int")
+        self.check_suite("def f():\n"
+                         "    x: str\n"
+                         "    y: int = 5\n")
+        self.check_suite("class C:\n"
+                         "    x: str\n"
+                         "    y: int = 5\n")
+        self.check_suite("class C:\n"
+                         "    def __init__(self, x: int) -> None:\n"
+                         "        self.x: int = x\n")
+        # double check for nonsense
+        with self.assertRaises(SyntaxError):
+            exec("2+2: int", {}, {})
+        with self.assertRaises(SyntaxError):
+            exec("[]: int = 5", {}, {})
+        with self.assertRaises(SyntaxError):
+            exec("x, *y, z: int = range(5)", {}, {})
+        with self.assertRaises(SyntaxError):
+            exec("t: tuple = 1, 2", {}, {})
+        with self.assertRaises(SyntaxError):
+            exec("u = v: int", {}, {})
+        with self.assertRaises(SyntaxError):
+            exec("False: int", {}, {})
+        with self.assertRaises(SyntaxError):
+            exec("x.False: int", {}, {})
+        with self.assertRaises(SyntaxError):
+            exec("x.y,: int", {}, {})
+        with self.assertRaises(SyntaxError):
+            exec("[0]: int", {}, {})
+        with self.assertRaises(SyntaxError):
+            exec("f(): int", {}, {})
 
     def test_simple_augmented_assignments(self):
         self.check_suite("a += b")
@@ -284,21 +322,19 @@ class RoundtripLegalSyntaxTestCase(unittest.TestCase):
         # An absolutely minimal test of position information.  Better
         # tests would be a big project.
         code = "def f(x):\n    return x + 1"
-        st1 = parser.suite(code)
-        st2 = st1.totuple(line_info=1, col_info=1)
+        st = parser.suite(code)
 
         def walk(tree):
             node_type = tree[0]
             next = tree[1]
-            if isinstance(next, tuple):
+            if isinstance(next, (tuple, list)):
                 for elt in tree[1:]:
                     for x in walk(elt):
                         yield x
             else:
                 yield tree
 
-        terminals = list(walk(st2))
-        self.assertEqual([
+        expected = [
             (1, 'def', 1, 0),
             (1, 'f', 1, 4),
             (7, '(', 1, 5),
@@ -314,8 +350,25 @@ class RoundtripLegalSyntaxTestCase(unittest.TestCase):
             (4, '', 2, 16),
             (6, '', 2, -1),
             (4, '', 2, -1),
-            (0, '', 2, -1)],
-                         terminals)
+            (0, '', 2, -1),
+        ]
+
+        self.assertEqual(list(walk(st.totuple(line_info=True, col_info=True))),
+                         expected)
+        self.assertEqual(list(walk(st.totuple())),
+                         [(t, n) for t, n, l, c in expected])
+        self.assertEqual(list(walk(st.totuple(line_info=True))),
+                         [(t, n, l) for t, n, l, c in expected])
+        self.assertEqual(list(walk(st.totuple(col_info=True))),
+                         [(t, n, c) for t, n, l, c in expected])
+        self.assertEqual(list(walk(st.tolist(line_info=True, col_info=True))),
+                         [list(x) for x in expected])
+        self.assertEqual(list(walk(parser.st2tuple(st, line_info=True,
+                                                   col_info=True))),
+                         expected)
+        self.assertEqual(list(walk(parser.st2list(st, line_info=True,
+                                                  col_info=True))),
+                         [list(x) for x in expected])
 
     def test_extended_unpacking(self):
         self.check_suite("*a = y")
@@ -641,16 +694,16 @@ class IllegalSyntaxTestCase(unittest.TestCase):
     def test_illegal_encoding(self):
         # Illegal encoding declaration
         tree = \
-            (338,
+            (339,
              (257, (0, '')))
         self.check_bad_tree(tree, "missed encoding")
         tree = \
-            (338,
+            (339,
              (257, (0, '')),
               b'iso-8859-1')
         self.check_bad_tree(tree, "non-string encoding")
         tree = \
-            (338,
+            (339,
              (257, (0, '')),
               '\udcff')
         with self.assertRaises(UnicodeEncodeError):
@@ -699,11 +752,17 @@ class CompileTestCase(unittest.TestCase):
         self.assertEqual(code.co_filename, '<syntax-tree>')
         code = st.compile()
         self.assertEqual(code.co_filename, '<syntax-tree>')
-        for filename in ('file.py', b'file.py',
-                         bytearray(b'file.py'), memoryview(b'file.py')):
+        for filename in 'file.py', b'file.py':
             code = parser.compilest(st, filename)
             self.assertEqual(code.co_filename, 'file.py')
             code = st.compile(filename)
+            self.assertEqual(code.co_filename, 'file.py')
+        for filename in bytearray(b'file.py'), memoryview(b'file.py'):
+            with self.assertWarns(DeprecationWarning):
+                code = parser.compilest(st, filename)
+            self.assertEqual(code.co_filename, 'file.py')
+            with self.assertWarns(DeprecationWarning):
+                code = st.compile(filename)
             self.assertEqual(code.co_filename, 'file.py')
         self.assertRaises(TypeError, parser.compilest, st, list(b'file.py'))
         self.assertRaises(TypeError, st.compile, list(b'file.py'))

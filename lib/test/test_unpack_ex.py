@@ -251,7 +251,7 @@ Overridden parameters
     >>> f(x=5, **{'x': 3}, **{'x': 2})
     Traceback (most recent call last):
       ...
-    TypeError: function got multiple values for keyword argument 'x'
+    TypeError: f() got multiple values for keyword argument 'x'
 
     >>> f(**{1: 3}, **{1: 5})
     Traceback (most recent call last):
@@ -357,7 +357,6 @@ Some size constraints (all fail.)
 __test__ = {'doctests' : doctests}
 
 def test_main(verbose=False):
-    import sys
     from test import support
     from test import test_unpack_ex
     support.run_doctest(test_unpack_ex, verbose)
