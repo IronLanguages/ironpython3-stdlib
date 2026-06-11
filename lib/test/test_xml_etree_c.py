@@ -11,6 +11,7 @@ cET_alias = import_fresh_module('xml.etree.cElementTree',
                                 fresh=['_elementtree', 'xml.etree'])
 
 
+@unittest.skipUnless(cET, 'requires _elementtree')
 class MiscTests(unittest.TestCase):
     # Issue #8651.
     @support.bigmemtest(size=support._2G + 100, memuse=1, dry_run=False)
@@ -54,6 +55,15 @@ class MiscTests(unittest.TestCase):
             del element.attrib
         self.assertEqual(element.attrib, {'A': 'B', 'C': 'D'})
 
+    def test_trashcan(self):
+        # If this test fails, it will most likely die via segfault.
+        e = root = cET.Element('root')
+        for i in range(200000):
+            e = cET.SubElement(e, 'x')
+        del e
+        del root
+        support.gc_collect()
+
 
 @unittest.skipUnless(cET, 'requires _elementtree')
 class TestAliasWorking(unittest.TestCase):
@@ -87,7 +97,7 @@ class SizeofTest(unittest.TestCase):
     def setUp(self):
         self.elementsize = support.calcobjsize('5P')
         # extra
-        self.extra = struct.calcsize('PiiP4P')
+        self.extra = struct.calcsize('PnnP4P')
 
     check_sizeof = support.check_sizeof
 

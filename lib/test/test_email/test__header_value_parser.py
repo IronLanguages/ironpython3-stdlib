@@ -1418,6 +1418,16 @@ class TestParser(TestParserMixin, TestEmailBase):
         self.assertEqual(addr_spec.domain, 'example.com')
         self.assertEqual(addr_spec.addr_spec, 'star.a.star@example.com')
 
+    def test_get_addr_spec_multiple_domains(self):
+        with self.assertRaises(errors.HeaderParseError):
+            parser.get_addr_spec('star@a.star@example.com')
+
+        with self.assertRaises(errors.HeaderParseError):
+            parser.get_addr_spec('star@a@example.com')
+
+        with self.assertRaises(errors.HeaderParseError):
+            parser.get_addr_spec('star@172.17.0.1@example.com')
+
     # get_obs_route
 
     def test_get_obs_route_simple(self):
@@ -2498,7 +2508,7 @@ class Test_parse_mime_parameters(TestParserMixin, TestEmailBase):
         # Note that it is undefined what we should do for error recovery when
         # there are duplicate parameter names or duplicate parts in a split
         # part.  We choose to ignore all duplicate parameters after the first
-        # and to take duplicate or missing rfc 2231 parts in apperance order.
+        # and to take duplicate or missing rfc 2231 parts in appearance order.
         # This is backward compatible with get_param's behavior, but the
         # decisions are arbitrary.
 
@@ -2563,6 +2573,13 @@ class Test_parse_mime_parameters(TestParserMixin, TestEmailBase):
             # Defects are apparent missing *0*, and two 'out of sequence'.
             [errors.InvalidHeaderDefect]*3),
 
+        # bpo-37461: Check that we don't go into an infinite loop.
+        'extra_dquote': (
+            'r*="\'a\'\\"',
+            ' r="\\""',
+            'r*=\'a\'"',
+            [('r', '"')],
+            [errors.InvalidHeaderDefect]*2),
     }
 
 @parameterize
@@ -2710,6 +2727,18 @@ class TestFolding(TestEmailBase):
     def test_whitespace_splitting(self):
         self._test(parser.get_unstructured('xxx   ' + 'y'*77),
                    'xxx  \n ' + 'y'*77 + '\n')
+
+    def test_long_filename_attachment(self):
+        folded = self.policy.fold('Content-Disposition', 'attachment; filename="TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TES.txt"')
+        self.assertEqual(
+            'Content-Disposition: attachment;\n filename="TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TES.txt"\n',
+            folded
+        )
+        folded = self.policy.fold('Content-Disposition', 'attachment; filename="TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_T.txt"')
+        self.assertEqual(
+            'Content-Disposition: attachment;\n filename="TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_TEST_T.txt"\n',
+            folded
+        )
 
 if __name__ == '__main__':
     unittest.main()

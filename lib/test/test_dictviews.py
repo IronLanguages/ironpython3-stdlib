@@ -1,7 +1,6 @@
 import copy
 import pickle
 import unittest
-from test import support
 
 class DictSetTest(unittest.TestCase):
 
@@ -202,13 +201,39 @@ class DictSetTest(unittest.TestCase):
     def test_recursive_repr(self):
         d = {}
         d[42] = d.values()
-        self.assertRaises(RuntimeError, repr, d)
+        self.assertRaises(RecursionError, repr, d)
 
     def test_copy(self):
         d = {1: 10, "a": "ABC"}
         self.assertRaises(TypeError, copy.copy, d.keys())
         self.assertRaises(TypeError, copy.copy, d.values())
         self.assertRaises(TypeError, copy.copy, d.items())
+
+    def test_compare_error(self):
+        class Exc(Exception):
+            pass
+
+        class BadEq:
+            def __hash__(self):
+                return 7
+            def __eq__(self, other):
+                raise Exc
+
+        k1, k2 = BadEq(), BadEq()
+        v1, v2 = BadEq(), BadEq()
+        d = {k1: v1}
+
+        self.assertIn(k1, d)
+        self.assertIn(k1, d.keys())
+        self.assertIn(v1, d.values())
+        self.assertIn((k1, v1), d.items())
+
+        self.assertRaises(Exc, d.__contains__, k2)
+        self.assertRaises(Exc, d.keys().__contains__, k2)
+        self.assertRaises(Exc, d.items().__contains__, (k2, v1))
+        self.assertRaises(Exc, d.items().__contains__, (k1, v2))
+        with self.assertRaises(Exc):
+            v2 in d.values()
 
     def test_pickle(self):
         d = {1: 10, "a": "ABC"}
@@ -221,8 +246,5 @@ class DictSetTest(unittest.TestCase):
                 pickle.dumps, d.items(), proto)
 
 
-def test_main():
-    support.run_unittest(DictSetTest)
-
 if __name__ == "__main__":
-    test_main()
+    unittest.main()

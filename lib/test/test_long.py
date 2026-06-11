@@ -582,8 +582,6 @@ class LongTest(unittest.TestCase):
                 return (x > y) - (x < y)
             def __eq__(self, other):
                 return self._cmp__(other) == 0
-            def __ne__(self, other):
-                return self._cmp__(other) != 0
             def __ge__(self, other):
                 return self._cmp__(other) >= 0
             def __gt__(self, other):
@@ -969,7 +967,7 @@ class LongTest(unittest.TestCase):
             self.assertIs(type(got), int)
 
         # bad second argument
-        bad_exponents = ('brian', 2.0, 0j, None)
+        bad_exponents = ('brian', 2.0, 0j)
         for e in bad_exponents:
             self.assertRaises(TypeError, round, 3, e)
 
@@ -1205,6 +1203,23 @@ class LongTest(unittest.TestCase):
         self.assertRaises(TypeError, myint.from_bytes, 0, 'big')
         self.assertRaises(TypeError, int.from_bytes, 0, 'big', True)
 
+        class myint2(int):
+            def __new__(cls, value):
+                return int.__new__(cls, value + 1)
+
+        i = myint2.from_bytes(b'\x01', 'big')
+        self.assertIs(type(i), myint2)
+        self.assertEqual(i, 2)
+
+        class myint3(int):
+            def __init__(self, value):
+                self.foo = 'bar'
+
+        i = myint3.from_bytes(b'\x01', 'big')
+        self.assertIs(type(i), myint3)
+        self.assertEqual(i, 1)
+        self.assertEqual(getattr(i, 'foo', 'none'), 'bar')
+
     def test_access_to_nonexistent_digit_0(self):
         # http://bugs.python.org/issue14630: A bug in _PyLong_Copy meant that
         # ob_digit[0] was being incorrectly accessed for instances of a
@@ -1227,8 +1242,5 @@ class LongTest(unittest.TestCase):
                 self.assertEqual(type(value >> shift), int)
 
 
-def test_main():
-    support.run_unittest(LongTest)
-
 if __name__ == "__main__":
-    test_main()
+    unittest.main()

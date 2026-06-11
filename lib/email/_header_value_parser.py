@@ -320,17 +320,18 @@ class TokenList(list):
         return ''.join(res)
 
     def _fold(self, folded):
+        encoding = 'utf-8' if folded.policy.utf8 else 'ascii'
         for part in self.parts:
             tstr = str(part)
             tlen = len(tstr)
             try:
-                str(part).encode('us-ascii')
+                str(part).encode(encoding)
             except UnicodeEncodeError:
                 if any(isinstance(x, errors.UndecodableBytesDefect)
                         for x in part.all_defects):
                     charset = 'unknown-8bit'
                 else:
-                    # XXX: this should be a policy setting
+                    # XXX: this should be a policy setting when utf8 is False.
                     charset = 'utf-8'
                 tstr = part.cte_encode(charset, folded.policy)
                 tlen = len(tstr)
@@ -340,9 +341,7 @@ class TokenList(list):
             # avoid infinite recursion.
             ws = part.pop_leading_fws()
             if ws is not None:
-                # Peel off the leading whitespace and make it sticky, to
-                # avoid infinite recursion.
-                folded.stickyspace = str(part.pop(0))
+                folded.stickyspace = str(ws)
                 if folded.append_if_fits(part):
                     continue
             if part.has_fws:
@@ -394,11 +393,12 @@ class UnstructuredTokenList(TokenList):
 
     def _fold(self, folded):
         last_ew = None
+        encoding = 'utf-8' if folded.policy.utf8 else 'ascii'
         for part in self.parts:
             tstr = str(part)
             is_ew = False
             try:
-                str(part).encode('us-ascii')
+                str(part).encode(encoding)
             except UnicodeEncodeError:
                 if any(isinstance(x, errors.UndecodableBytesDefect)
                        for x in part.all_defects):
@@ -437,7 +437,7 @@ class UnstructuredTokenList(TokenList):
                 if folded.append_if_fits(part):
                     continue
             if part.has_fws:
-                part.fold(folded)
+                part._fold(folded)
                 continue
             # It can't be split...we just have to put it on its own line.
             folded.append(tstr)
@@ -458,7 +458,7 @@ class UnstructuredTokenList(TokenList):
                     last_ew = len(res)
                 else:
                     tl = get_unstructured(''.join(res[last_ew:] + [spart]))
-                    res.append(tl.as_encoded_word())
+                    res.append(tl.as_encoded_word(charset))
         return ''.join(res)
 
 
@@ -475,12 +475,13 @@ class Phrase(TokenList):
         # comment that becomes a barrier across which we can't compose encoded
         # words.
         last_ew = None
+        encoding = 'utf-8' if folded.policy.utf8 else 'ascii'
         for part in self.parts:
             tstr = str(part)
             tlen = len(tstr)
             has_ew = False
             try:
-                str(part).encode('us-ascii')
+                str(part).encode(encoding)
             except UnicodeEncodeError:
                 if any(isinstance(x, errors.UndecodableBytesDefect)
                         for x in part.all_defects):
@@ -1519,7 +1520,7 @@ def get_qp_ctext(value):
     This is not the RFC ctext, since we are handling nested comments in comment
     and unquoting quoted-pairs here.  We allow anything except the '()'
     characters, but if we find any ASCII other than the RFC defined printable
-    ASCII an NonPrintableDefect is added to the token's defects list.  Since
+    ASCII, a NonPrintableDefect is added to the token's defects list.  Since
     quoted pairs are converted to their unquoted values, what is returned is
     a 'ptext' token.  In this case it is a WhiteSpaceTerminal, so it's value
     is ' '.
@@ -1534,7 +1535,7 @@ def get_qcontent(value):
     """qcontent = qtext / quoted-pair
 
     We allow anything except the DQUOTE character, but if we find any ASCII
-    other than the RFC defined printable ASCII an NonPrintableDefect is
+    other than the RFC defined printable ASCII, a NonPrintableDefect is
     added to the token's defects list.  Any quoted pairs are converted to their
     unquoted values, so what is returned is a 'ptext' token.  In this case it
     is a ValueTerminal.
@@ -1879,7 +1880,7 @@ def get_dtext(value):
         obs-dtext = obs-NO-WS-CTL / quoted-pair
 
     We allow anything except the excluded characters, but if we find any
-    ASCII other than the RFC defined printable ASCII an NonPrintableDefect is
+    ASCII other than the RFC defined printable ASCII, a NonPrintableDefect is
     added to the token's defects list.  Quoted pairs are converted to their
     unquoted values, so what is returned is a ptext token, in this case a
     ValueTerminal.  If there were quoted-printables, an ObsoleteHeaderDefect is
@@ -1963,6 +1964,8 @@ def get_domain(value):
         token, value = get_dot_atom(value)
     except errors.HeaderParseError:
         token, value = get_atom(value)
+    if value and value[0] == '@':
+        raise errors.HeaderParseError('Invalid Domain')
     if leader is not None:
         token[:0] = [leader]
     domain.append(token)
@@ -2768,6 +2771,9 @@ def get_parameter(value):
         while value:
             if value[0] in WSP:
                 token, value = get_fws(value)
+            elif value[0] == '"':
+                token = ValueTerminal('"', 'DQUOTE')
+                value = value[1:]
             else:
                 token, value = get_qcontent(value)
             v.append(token)
@@ -2869,7 +2875,7 @@ def parse_content_type_header(value):
         _find_mime_parameters(ctype, value)
         return ctype
     ctype.append(token)
-    # XXX: If we really want to follow the formal grammer we should make
+    # XXX: If we really want to follow the formal grammar we should make
     # mantype and subtype specialized TokenLists here.  Probably not worth it.
     if not value or value[0] != '/':
         ctype.defects.append(errors.InvalidHeaderDefect(

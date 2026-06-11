@@ -3,12 +3,15 @@
 import ast
 import builtins
 import collections
+import decimal
+import fractions
 import io
 import locale
 import os
 import pickle
 import platform
 import random
+import re
 import sys
 import traceback
 import types
@@ -16,7 +19,7 @@ import unittest
 import warnings
 from operator import neg
 from test.support import TESTFN, unlink,  run_unittest, check_warnings
-from test.script_helper import assert_python_ok
+from test.support.script_helper import assert_python_ok
 try:
     import pty, signal
 except ImportError:
@@ -148,6 +151,8 @@ class BuiltinTest(unittest.TestCase):
         self.assertRaises(TypeError, __import__, 1, 2, 3, 4)
         self.assertRaises(ValueError, __import__, '')
         self.assertRaises(TypeError, __import__, 'sys', name='sys')
+        # embedded null character
+        self.assertRaises((ImportError, ValueError), __import__, 'string\x00')
 
     def test_abs(self):
         # int
@@ -312,11 +317,11 @@ class BuiltinTest(unittest.TestCase):
         self.assertRaises(TypeError, compile)
         self.assertRaises(ValueError, compile, 'print(42)\n', '<string>', 'badmode')
         self.assertRaises(ValueError, compile, 'print(42)\n', '<string>', 'single', 0xff)
-        self.assertRaises(TypeError, compile, chr(0), 'f', 'exec')
+        self.assertRaises(ValueError, compile, chr(0), 'f', 'exec')
         self.assertRaises(TypeError, compile, 'pass', '?', 'exec',
                           mode='eval', source='0', filename='tmp')
         compile('print("\xe5")\n', '', 'exec')
-        self.assertRaises(TypeError, compile, chr(0), 'f', 'exec')
+        self.assertRaises(ValueError, compile, chr(0), 'f', 'exec')
         self.assertRaises(ValueError, compile, str('a = 1'), 'f', 'bad')
 
         # test the optimize argument
@@ -999,6 +1004,10 @@ class BuiltinTest(unittest.TestCase):
             self.assertEqual(fp.read(300), 'XXX'*100)
             self.assertEqual(fp.read(1000), 'YYY'*100)
 
+        # embedded null bytes and characters
+        self.assertRaises(ValueError, open, 'a\x00b')
+        self.assertRaises(ValueError, open, b'a\x00b')
+
     def test_open_default_encoding(self):
         old_environ = dict(os.environ)
         try:
@@ -1094,7 +1103,7 @@ class BuiltinTest(unittest.TestCase):
         self.assertAlmostEqual(pow(-1, 0.5), 1j)
         self.assertAlmostEqual(pow(-1, 1/3), 0.5 + 0.8660254037844386j)
 
-        self.assertRaises(TypeError, pow, -1, -2, 3)
+        self.assertRaises(ValueError, pow, -1, -2, 3)
         self.assertRaises(ValueError, pow, 1, 2, 0)
 
         self.assertRaises(TypeError, pow)
@@ -1243,6 +1252,15 @@ class BuiltinTest(unittest.TestCase):
         self.assertEqual(round(5e15+1), 5e15+1)
         self.assertEqual(round(5e15+2), 5e15+2)
         self.assertEqual(round(5e15+3), 5e15+3)
+
+    def test_bug_27936(self):
+        # Verify that ndigits=None means the same as passing in no argument
+        for x in [1234,
+                  1234.56,
+                  decimal.Decimal('1234.56'),
+                  fractions.Fraction(123456, 100)]:
+            self.assertEqual(round(x, None), round(x))
+            self.assertEqual(type(round(x, None)), type(round(x)))
 
     def test_setattr(self):
         setattr(sys, 'spam', 1)
@@ -1436,21 +1454,14 @@ class BuiltinTest(unittest.TestCase):
 
         # --------------------------------------------------------------------
         # Issue #7994: object.__format__ with a non-empty format string is
-        #  deprecated
-        def test_deprecated_format_string(obj, fmt_str, should_raise):
-            if should_raise:
-                self.assertRaises(TypeError, format, obj, fmt_str)
-            else:
-                format(obj, fmt_str)
-
-        fmt_strs = ['', 's']
-
+        # disallowed
         class A:
             def __format__(self, fmt_str):
                 return format('', fmt_str)
 
-        for fmt_str in fmt_strs:
-            test_deprecated_format_string(A(), fmt_str, False)
+        self.assertEqual(format(A()), '')
+        self.assertEqual(format(A(), ''), '')
+        self.assertEqual(format(A(), 's'), '')
 
         class B:
             pass
@@ -1459,8 +1470,12 @@ class BuiltinTest(unittest.TestCase):
             pass
 
         for cls in [object, B, C]:
-            for fmt_str in fmt_strs:
-                test_deprecated_format_string(cls(), fmt_str, len(fmt_str) != 0)
+            obj = cls()
+            self.assertEqual(format(obj), str(obj))
+            self.assertEqual(format(obj, ''), str(obj))
+            with self.assertRaisesRegex(TypeError,
+                                        r'\b%s\b' % re.escape(cls.__name__)):
+                format(obj, 's')
         # --------------------------------------------------------------------
 
         # make sure we can take a subclass of str as a format spec
@@ -1666,6 +1681,161 @@ class ShutdownTest(unittest.TestCase):
         rc, out, err = assert_python_ok("-c", code,
                                         PYTHONIOENCODING="ascii")
         self.assertEqual(["before", "after"], out.decode().splitlines())
+
+
+class TestType(unittest.TestCase):
+    def test_new_type(self):
+        A = type('A', (), {})
+        self.assertEqual(A.__name__, 'A')
+        self.assertEqual(A.__qualname__, 'A')
+        self.assertEqual(A.__module__, __name__)
+        self.assertEqual(A.__bases__, (object,))
+        self.assertIs(A.__base__, object)
+        x = A()
+        self.assertIs(type(x), A)
+        self.assertIs(x.__class__, A)
+
+        class B:
+            def ham(self):
+                return 'ham%d' % self
+        C = type('C', (B, int), {'spam': lambda self: 'spam%s' % self})
+        self.assertEqual(C.__name__, 'C')
+        self.assertEqual(C.__qualname__, 'C')
+        self.assertEqual(C.__module__, __name__)
+        self.assertEqual(C.__bases__, (B, int))
+        self.assertIs(C.__base__, int)
+        self.assertIn('spam', C.__dict__)
+        self.assertNotIn('ham', C.__dict__)
+        x = C(42)
+        self.assertEqual(x, 42)
+        self.assertIs(type(x), C)
+        self.assertIs(x.__class__, C)
+        self.assertEqual(x.ham(), 'ham42')
+        self.assertEqual(x.spam(), 'spam42')
+        self.assertEqual(x.to_bytes(2, 'little'), b'\x2a\x00')
+
+    def test_type_new_keywords(self):
+        class B:
+            def ham(self):
+                return 'ham%d' % self
+        C = type.__new__(type,
+                         name='C',
+                         bases=(B, int),
+                         dict={'spam': lambda self: 'spam%s' % self})
+        self.assertEqual(C.__name__, 'C')
+        self.assertEqual(C.__qualname__, 'C')
+        self.assertEqual(C.__module__, __name__)
+        self.assertEqual(C.__bases__, (B, int))
+        self.assertIs(C.__base__, int)
+        self.assertIn('spam', C.__dict__)
+        self.assertNotIn('ham', C.__dict__)
+
+    def test_type_name(self):
+        for name in 'A', '\xc4', '\U0001f40d', 'B.A', '42', '':
+            with self.subTest(name=name):
+                A = type(name, (), {})
+                self.assertEqual(A.__name__, name)
+                self.assertEqual(A.__qualname__, name)
+                self.assertEqual(A.__module__, __name__)
+        with self.assertRaises(ValueError):
+            type('A\x00B', (), {})
+        with self.assertRaises(ValueError):
+            type('A\udcdcB', (), {})
+        with self.assertRaises(TypeError):
+            type(b'A', (), {})
+
+        C = type('C', (), {})
+        for name in 'A', '\xc4', '\U0001f40d', 'B.A', '42', '':
+            with self.subTest(name=name):
+                C.__name__ = name
+                self.assertEqual(C.__name__, name)
+                self.assertEqual(C.__qualname__, 'C')
+                self.assertEqual(C.__module__, __name__)
+
+        A = type('C', (), {})
+        with self.assertRaises(ValueError):
+            A.__name__ = 'A\x00B'
+        self.assertEqual(A.__name__, 'C')
+        with self.assertRaises(ValueError):
+            A.__name__ = 'A\udcdcB'
+        self.assertEqual(A.__name__, 'C')
+        with self.assertRaises(TypeError):
+            A.__name__ = b'A'
+        self.assertEqual(A.__name__, 'C')
+
+    def test_type_qualname(self):
+        A = type('A', (), {'__qualname__': 'B.C'})
+        self.assertEqual(A.__name__, 'A')
+        self.assertEqual(A.__qualname__, 'B.C')
+        self.assertEqual(A.__module__, __name__)
+        with self.assertRaises(TypeError):
+            type('A', (), {'__qualname__': b'B'})
+        self.assertEqual(A.__qualname__, 'B.C')
+
+        A.__qualname__ = 'D.E'
+        self.assertEqual(A.__name__, 'A')
+        self.assertEqual(A.__qualname__, 'D.E')
+        with self.assertRaises(TypeError):
+            A.__qualname__ = b'B'
+        self.assertEqual(A.__qualname__, 'D.E')
+
+    def test_type_doc(self):
+        for doc in 'x', '\xc4', '\U0001f40d', 'x\x00y', b'x', 42, None:
+            A = type('A', (), {'__doc__': doc})
+            self.assertEqual(A.__doc__, doc)
+        with self.assertRaises(UnicodeEncodeError):
+            type('A', (), {'__doc__': 'x\udcdcy'})
+
+        A = type('A', (), {})
+        self.assertEqual(A.__doc__, None)
+        for doc in 'x', '\xc4', '\U0001f40d', 'x\x00y', 'x\udcdcy', b'x', 42, None:
+            A.__doc__ = doc
+            self.assertEqual(A.__doc__, doc)
+
+    def test_bad_args(self):
+        with self.assertRaises(TypeError):
+            type()
+        with self.assertRaises(TypeError):
+            type('A', ())
+        with self.assertRaises(TypeError):
+            type('A', (), {}, ())
+        with self.assertRaises(TypeError):
+            type('A', (), dict={})
+        with self.assertRaises(TypeError):
+            type('A', [], {})
+        with self.assertRaises(TypeError):
+            type('A', (), types.MappingProxyType({}))
+        with self.assertRaises(TypeError):
+            type('A', (None,), {})
+        with self.assertRaises(TypeError):
+            type('A', (bool,), {})
+        with self.assertRaises(TypeError):
+            type('A', (int, str), {})
+
+    def test_bad_slots(self):
+        with self.assertRaises(TypeError):
+            type('A', (), {'__slots__': b'x'})
+        with self.assertRaises(TypeError):
+            type('A', (int,), {'__slots__': 'x'})
+        with self.assertRaises(TypeError):
+            type('A', (), {'__slots__': ''})
+        with self.assertRaises(TypeError):
+            type('A', (), {'__slots__': '42'})
+        with self.assertRaises(TypeError):
+            type('A', (), {'__slots__': 'x\x00y'})
+        with self.assertRaises(ValueError):
+            type('A', (), {'__slots__': 'x', 'x': 0})
+        with self.assertRaises(TypeError):
+            type('A', (), {'__slots__': ('__dict__', '__dict__')})
+        with self.assertRaises(TypeError):
+            type('A', (), {'__slots__': ('__weakref__', '__weakref__')})
+
+        class B:
+            pass
+        with self.assertRaises(TypeError):
+            type('A', (B,), {'__slots__': '__dict__'})
+        with self.assertRaises(TypeError):
+            type('A', (B,), {'__slots__': '__weakref__'})
 
 
 def load_tests(loader, tests, pattern):

@@ -184,7 +184,7 @@ def parse(fp=None, environ=os.environ, keep_blank_values=0, strict_parsing=0):
 
 
 # parse query string function called from urlparse,
-# this is done in order to maintain backward compatiblity.
+# this is done in order to maintain backward compatibility.
 
 def parse_qs(qs, keep_blank_values=0, strict_parsing=0):
     """Parse a query given as a string argument."""
@@ -565,6 +565,12 @@ class FieldStorage:
             self.file.close()
         except AttributeError:
             pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.file.close()
 
     def __repr__(self):
         """Return a printable representation."""

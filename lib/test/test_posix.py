@@ -9,7 +9,6 @@ import errno
 import sys
 import time
 import os
-import fcntl
 import platform
 import pwd
 import shutil
@@ -355,7 +354,7 @@ class PosixTester(unittest.TestCase):
     def test_oscloexec(self):
         fd = os.open(support.TESTFN, os.O_RDONLY|os.O_CLOEXEC)
         self.addCleanup(os.close, fd)
-        self.assertTrue(fcntl.fcntl(fd, fcntl.F_GETFD) & fcntl.FD_CLOEXEC)
+        self.assertFalse(os.get_inheritable(fd))
 
     @unittest.skipUnless(hasattr(posix, 'O_EXLOCK'),
                          'test needs posix.O_EXLOCK')
@@ -578,17 +577,25 @@ class PosixTester(unittest.TestCase):
         self.assertRaises(OSError, posix.chdir, support.TESTFN)
 
     def test_listdir(self):
-        self.assertTrue(support.TESTFN in posix.listdir(os.curdir))
+        self.assertIn(support.TESTFN, posix.listdir(os.curdir))
 
     def test_listdir_default(self):
         # When listdir is called without argument,
         # it's the same as listdir(os.curdir).
-        self.assertTrue(support.TESTFN in posix.listdir())
+        self.assertIn(support.TESTFN, posix.listdir())
 
     def test_listdir_bytes(self):
         # When listdir is called with a bytes object,
         # the returned strings are of type bytes.
-        self.assertTrue(os.fsencode(support.TESTFN) in posix.listdir(b'.'))
+        self.assertIn(os.fsencode(support.TESTFN), posix.listdir(b'.'))
+
+    def test_listdir_bytes_like(self):
+        # Deprecated in 3.6.
+        for cls in bytearray, memoryview:
+            names = posix.listdir(cls(b'.'))
+            self.assertIn(os.fsencode(support.TESTFN), names)
+            for name in names:
+                self.assertIs(type(name), bytes)
 
     @unittest.skipUnless(posix.listdir in os.supports_fd,
                          "test needs fd support for posix.listdir()")
@@ -643,8 +650,8 @@ class PosixTester(unittest.TestCase):
         self.addCleanup(os.close, w)
         self.assertFalse(os.get_inheritable(r))
         self.assertFalse(os.get_inheritable(w))
-        self.assertTrue(fcntl.fcntl(r, fcntl.F_GETFL) & os.O_NONBLOCK)
-        self.assertTrue(fcntl.fcntl(w, fcntl.F_GETFL) & os.O_NONBLOCK)
+        self.assertFalse(os.get_blocking(r))
+        self.assertFalse(os.get_blocking(w))
         # try reading from an empty pipe: this should fail, not block
         self.assertRaises(OSError, os.read, r, 1)
         # try a write big enough to fill-up the pipe: this should either
@@ -747,6 +754,21 @@ class PosixTester(unittest.TestCase):
         for k, v in posix.environ.items():
             self.assertEqual(type(k), item_type)
             self.assertEqual(type(v), item_type)
+
+    @unittest.skipUnless(hasattr(os, "putenv"), "requires os.putenv()")
+    def test_putenv(self):
+        with self.assertRaises(ValueError):
+            os.putenv('FRUIT\0VEGETABLE', 'cabbage')
+        with self.assertRaises(ValueError):
+            os.putenv(b'FRUIT\0VEGETABLE', b'cabbage')
+        with self.assertRaises(ValueError):
+            os.putenv('FRUIT', 'orange\0VEGETABLE=cabbage')
+        with self.assertRaises(ValueError):
+            os.putenv(b'FRUIT', b'orange\0VEGETABLE=cabbage')
+        with self.assertRaises(ValueError):
+            os.putenv('FRUIT=ORANGE', 'lemon')
+        with self.assertRaises(ValueError):
+            os.putenv(b'FRUIT=ORANGE', b'lemon')
 
     @unittest.skipUnless(hasattr(posix, 'getcwd'), 'test needs posix.getcwd()')
     def test_getcwd_long_pathnames(self):
@@ -1184,16 +1206,16 @@ class PosixTester(unittest.TestCase):
         support.unlink(fn)
         fd = None
         try:
-            with self.assertRaises(TypeError):
+            with self.assertRaises(ValueError):
                 fd = os.open(fn_with_NUL, os.O_WRONLY | os.O_CREAT) # raises
         finally:
             if fd is not None:
                 os.close(fd)
         self.assertFalse(os.path.exists(fn))
-        self.assertRaises(TypeError, os.mkdir, fn_with_NUL)
+        self.assertRaises(ValueError, os.mkdir, fn_with_NUL)
         self.assertFalse(os.path.exists(fn))
         open(fn, 'wb').close()
-        self.assertRaises(TypeError, os.stat, fn_with_NUL)
+        self.assertRaises(ValueError, os.stat, fn_with_NUL)
 
     def test_path_with_null_byte(self):
         fn = os.fsencode(support.TESTFN)

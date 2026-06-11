@@ -424,6 +424,17 @@ class TestMockingMagicMethods(unittest.TestCase):
         self.assertEqual(list(m), [])
 
 
+    def test_matmul(self):
+        m = MagicMock()
+        self.assertIsInstance(m @ 1, MagicMock)
+        m.__matmul__.return_value = 42
+        m.__rmatmul__.return_value = 666
+        m.__imatmul__.return_value = 24
+        self.assertEqual(m @ 1, 42)
+        self.assertEqual(1 @ m, 666)
+        m @= 24
+        self.assertEqual(m, 24)
+
     def test_divmod_and_rdivmod(self):
         m = MagicMock()
         self.assertIsInstance(divmod(5, m), MagicMock)

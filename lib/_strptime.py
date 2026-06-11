@@ -171,9 +171,9 @@ class LocaleTime(object):
             pass
         self.tzname = time.tzname
         self.daylight = time.daylight
-        no_saving = frozenset(["utc", "gmt", self.tzname[0].lower()])
+        no_saving = frozenset({"utc", "gmt", self.tzname[0].lower()})
         if self.daylight:
-            has_saving = frozenset([self.tzname[1].lower()])
+            has_saving = frozenset({self.tzname[1].lower()})
         else:
             has_saving = frozenset()
         self.timezone = (no_saving, has_saving)
@@ -257,8 +257,8 @@ class TimeRE(dict):
         # format directives (%m, etc.).
         regex_chars = re_compile(r"([\\.^$*+?\(\){}\[\]|])")
         format = regex_chars.sub(r"\\\1", format)
-        whitespace_replacement = re_compile('\s+')
-        format = whitespace_replacement.sub('\s+', format)
+        whitespace_replacement = re_compile(r'\s+')
+        format = whitespace_replacement.sub(r'\\s+', format)
         while '%' in format:
             directive_index = format.index('%')+1
             processed_format = "%s%s%s" % (processed_format,
@@ -311,7 +311,6 @@ def _strptime(data_string, format="%a %b %d %H:%M:%S %Y"):
 
     global _TimeRE_cache, _regex_cache
     with _cache_lock:
-
         locale_time = _TimeRE_cache.locale_time
         if (_getlang() != locale_time.lang or
             time.tzname != locale_time.tzname or
@@ -463,6 +462,10 @@ def _strptime(data_string, format="%a %b %d %H:%M:%S %Y"):
         week_starts_Mon = True if week_of_year_start == 0 else False
         julian = _calc_julian_from_U_or_W(year, week_of_year, weekday,
                                             week_starts_Mon)
+        if julian <= 0:
+            year -= 1
+            yday = 366 if calendar.isleap(year) else 365
+            julian += yday
     # Cannot pre-calculate datetime_date() since can change in Julian
     # calculation and thus could have different value for the day of the week
     # calculation.

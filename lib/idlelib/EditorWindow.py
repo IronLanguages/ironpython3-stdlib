@@ -25,8 +25,8 @@ from idlelib import help
 
 # The default tab setting for a Text widget, in average-width characters.
 TK_TABWIDTH_DEFAULT = 8
-
 _py_version = ' (%s)' % platform.python_version()
+
 
 def _sphinx_version():
     "Format sys.version_info to produce the Sphinx version string used to install the chm docs"
@@ -90,13 +90,14 @@ helpDialog = HelpDialog()  # singleton instance, no longer used
 
 class EditorWindow(object):
     from idlelib.Percolator import Percolator
-    from idlelib.ColorDelegator import ColorDelegator
+    from idlelib.ColorDelegator import ColorDelegator, color_config
     from idlelib.UndoDelegator import UndoDelegator
-    from idlelib.IOBinding import IOBinding, filesystemencoding, encoding
+    from idlelib.IOBinding import IOBinding, encoding
     from idlelib import Bindings
     from tkinter import Toplevel
     from idlelib.MultiStatusBar import MultiStatusBar
 
+    filesystemencoding = sys.getfilesystemencoding()  # for file names
     help_url = None
 
     def __init__(self, flist=None, filename=None, key=None, root=None):
@@ -742,20 +743,7 @@ class EditorWindow(object):
         # Called from self.filename_change_hook and from configDialog.py
         self._rmcolorizer()
         self._addcolorizer()
-        theme = idleConf.CurrentTheme()
-        normal_colors = idleConf.GetHighlight(theme, 'normal')
-        cursor_color = idleConf.GetHighlight(theme, 'cursor', fgBg='fg')
-        select_colors = idleConf.GetHighlight(theme, 'hilite')
-        self.text.config(
-            foreground=normal_colors['foreground'],
-            background=normal_colors['background'],
-            insertbackground=cursor_color,
-            selectforeground=select_colors['foreground'],
-            selectbackground=select_colors['background'],
-            )
-        if TkVersion >= 8.5:
-            self.text.config(
-                inactiveselectbackground=select_colors['background'])
+        EditorWindow.color_config(self.text)
 
     IDENTCHARS = string.ascii_letters + string.digits + "_"
 
@@ -1699,5 +1687,8 @@ def _editor_window(parent):  # htest #
     # edit.text.bind("<<close-window>>", edit.close_event)
 
 if __name__ == '__main__':
+    import unittest
+    unittest.main('idlelib.idle_test.test_editor', verbosity=2, exit=False)
+
     from idlelib.idle_test.htest import run
     run(_editor_window)

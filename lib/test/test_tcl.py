@@ -8,9 +8,7 @@ from test import support
 # Skip this test if the _tkinter module wasn't built.
 _tkinter = support.import_module('_tkinter')
 
-# Make sure tkinter._fix runs to set up the environment
-tkinter = support.import_fresh_module('tkinter')
-
+import tkinter
 from tkinter import Tcl
 from _tkinter import TclError
 
@@ -131,9 +129,7 @@ class TclTest(unittest.TestCase):
         self.assertRaises(TclError,tcl.unsetvar,'a')
 
     def get_integers(self):
-        integers = (0, 1, -1, 2**31-1, -2**31)
-        if tcl_version >= (8, 4):  # wideInt was added in Tcl 8.4
-            integers += (2**31, -2**31-1, 2**63-1, -2**63)
+        integers = (0, 1, -1, 2**31-1, -2**31, 2**31, -2**31-1, 2**63-1, -2**63)
         # bignum was added in Tcl 8.5, but its support is able only since 8.5.8
         if (get_tk_patchlevel() >= (8, 6, 0, 'final') or
             (8, 5, 8) <= get_tk_patchlevel() < (8, 6)):
@@ -166,10 +162,10 @@ class TclTest(unittest.TestCase):
         self.assertEqual(tcl.getdouble(' 42 '), 42.0)
         self.assertEqual(tcl.getdouble(' 42.5 '), 42.5)
         self.assertEqual(tcl.getdouble(42.5), 42.5)
+        self.assertEqual(tcl.getdouble(42), 42.0)
         self.assertRaises(TypeError, tcl.getdouble)
         self.assertRaises(TypeError, tcl.getdouble, '42.5', '10')
         self.assertRaises(TypeError, tcl.getdouble, b'42.5')
-        self.assertRaises(TypeError, tcl.getdouble, 42)
         self.assertRaises(TclError, tcl.getdouble, 'a')
         self.assertRaises((TypeError, ValueError, TclError),
                           tcl.getdouble, '42.5\0')
@@ -464,6 +460,8 @@ class TclTest(unittest.TestCase):
             # XXX NaN representation can be not parsable by float()
         self.assertEqual(passValue((1, '2', (3.4,))),
                          (1, '2', (3.4,)) if self.wantobjects else '1 2 3.4')
+        self.assertEqual(passValue(['a', ['b', 'c']]),
+                         ('a', ('b', 'c')) if self.wantobjects else 'a {b c}')
 
     def test_user_command(self):
         result = None
@@ -517,6 +515,7 @@ class TclTest(unittest.TestCase):
         # XXX NaN representation can be not parsable by float()
         check((), '')
         check((1, (2,), (3, 4), '5 6', ()), '1 2 {3 4} {5 6} {}')
+        check([1, [2,], [3, 4], '5 6', []], '1 2 {3 4} {5 6} {}')
 
     def test_splitlist(self):
         splitlist = self.interp.tk.splitlist
@@ -542,12 +541,15 @@ class TclTest(unittest.TestCase):
             ('a 3.4', ('a', '3.4')),
             (('a', 3.4), ('a', 3.4)),
             ((), ()),
+            ([], ()),
+            (['a', ['b', 'c']], ('a', ['b', 'c'])),
             (call('list', 1, '2', (3.4,)),
                 (1, '2', (3.4,)) if self.wantobjects else
                 ('1', '2', '3.4')),
         ]
+        tk_patchlevel = get_tk_patchlevel()
         if tcl_version >= (8, 5):
-            if not self.wantobjects or get_tk_patchlevel() < (8, 5, 5):
+            if not self.wantobjects or tk_patchlevel < (8, 5, 5):
                 # Before 8.5.5 dicts were converted to lists through string
                 expected = ('12', '\u20ac', '\xe2\x82\xac', '3.4')
             else:
@@ -556,8 +558,11 @@ class TclTest(unittest.TestCase):
                 (call('dict', 'create', 12, '\u20ac', b'\xe2\x82\xac', (3.4,)),
                     expected),
             ]
+        dbg_info = ('want objects? %s, Tcl version: %s, Tk patchlevel: %s'
+                    % (self.wantobjects, tcl_version, tk_patchlevel))
         for arg, res in testcases:
-            self.assertEqual(splitlist(arg), res, msg=arg)
+            self.assertEqual(splitlist(arg), res,
+                             'arg=%a, %s' % (arg, dbg_info))
         self.assertRaises(TclError, splitlist, '{')
 
     def test_split(self):
@@ -589,6 +594,9 @@ class TclTest(unittest.TestCase):
             (('a', 3.4), ('a', 3.4)),
             (('a', (2, 3.4)), ('a', (2, 3.4))),
             ((), ()),
+            ([], ()),
+            (['a', 'b c'], ('a', ('b', 'c'))),
+            (['a', ['b', 'c']], ('a', ('b', 'c'))),
             (call('list', 1, '2', (3.4,)),
                 (1, '2', (3.4,)) if self.wantobjects else
                 ('1', '2', '3.4')),
@@ -641,6 +649,8 @@ class TclTest(unittest.TestCase):
                 expected = {'a': (1, 2, 3), 'something': 'foo', 'status': ''}
             self.assertEqual(splitdict(tcl, arg), expected)
 
+    def test_new_tcl_obj(self):
+        self.assertRaises(TypeError, _tkinter.Tcl_Obj)
 
 class BigmemTclTest(unittest.TestCase):
 

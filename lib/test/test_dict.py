@@ -836,6 +836,24 @@ class DictTest(unittest.TestCase):
             pass
         self._tracked(MyDict())
 
+    @support.cpython_only
+    def test_splittable_setattr_after_pop(self):
+        """setattr must not convert combined table into split table"""
+        # Issue 28147
+        import _testcapi
+
+        class C:
+            pass
+        a = C()
+        a.a = 2
+        self.assertTrue(_testcapi.dict_hassplittable(a.__dict__))
+        # dict.popitem() convert it to combined table
+        a.__dict__.popitem()
+        self.assertFalse(_testcapi.dict_hassplittable(a.__dict__))
+        # But C should not convert a.__dict__ to split table again.
+        a.a = 3
+        self.assertFalse(_testcapi.dict_hassplittable(a.__dict__))
+
     def test_iterator_pickling(self):
         for proto in range(pickle.HIGHEST_PROTOCOL + 1):
             data = {1:"a", 2:"b", 3:"c"}
@@ -861,7 +879,7 @@ class DictTest(unittest.TestCase):
             itorg = iter(data.items())
             d = pickle.dumps(itorg, proto)
             it = pickle.loads(d)
-            # note that the type of type of the unpickled iterator
+            # note that the type of the unpickled iterator
             # is not necessarily the same as the original.  It is
             # merely an object supporting the iterator protocol, yielding
             # the same objects as the original one.
@@ -951,6 +969,12 @@ class DictTest(unittest.TestCase):
         other[X()] = 0
         d = {X(): 0, 1: 1}
         self.assertRaises(RuntimeError, d.update, other)
+
+    def test_free_after_iterating(self):
+        support.check_free_after_iterating(self, iter, dict)
+        support.check_free_after_iterating(self, lambda d: iter(d.keys()), dict)
+        support.check_free_after_iterating(self, lambda d: iter(d.values()), dict)
+        support.check_free_after_iterating(self, lambda d: iter(d.items()), dict)
 
     def test_equal_operator_modifying_operand(self):
         # test fix for seg fault reported in issue 27945 part 3.
@@ -1049,12 +1073,5 @@ class Dict(dict):
 class SubclassMappingTests(mapping_tests.BasicTestMappingProtocol):
     type2test = Dict
 
-def test_main():
-    support.run_unittest(
-        DictTest,
-        GeneralMappingTests,
-        SubclassMappingTests,
-    )
-
 if __name__ == "__main__":
-    test_main()
+    unittest.main()

@@ -36,10 +36,7 @@ To do:
 import sys
 import socket
 import selectors
-try:
-    from time import monotonic as _time
-except ImportError:
-    from time import time as _time
+from time import monotonic as _time
 
 __all__ = ["Telnet"]
 
@@ -265,8 +262,8 @@ class Telnet:
     def close(self):
         """Close the connection."""
         sock = self.sock
-        self.sock = 0
-        self.eof = 1
+        self.sock = None
+        self.eof = True
         self.iacseq = b''
         self.sb = 0
         if sock:

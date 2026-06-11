@@ -1234,8 +1234,8 @@ class MH(Mailbox):
 class Babyl(_singlefileMailbox):
     """An Rmail-style Babyl mailbox."""
 
-    _special_labels = frozenset(('unseen', 'deleted', 'filed', 'answered',
-                                 'forwarded', 'edited', 'resent'))
+    _special_labels = frozenset({'unseen', 'deleted', 'filed', 'answered',
+                                 'forwarded', 'edited', 'resent'})
 
     def __init__(self, path, factory=None, create=True):
         """Initialize a Babyl mailbox."""
@@ -1821,7 +1821,7 @@ class BabylMessage(Message):
     _type_specific_attributes = ['_labels', '_visible']
 
     def __init__(self, message=None):
-        """Initialize an BabylMessage instance."""
+        """Initialize a BabylMessage instance."""
         self._labels = []
         self._visible = Message()
         Message.__init__(self, message)
@@ -1953,7 +1953,7 @@ class _ProxyFile:
         while True:
             line = self.readline()
             if not line:
-                raise StopIteration
+                return
             yield line
 
     def tell(self):
@@ -1970,9 +1970,11 @@ class _ProxyFile:
     def close(self):
         """Close the file."""
         if hasattr(self, '_file'):
-            if hasattr(self._file, 'close'):
-                self._file.close()
-            del self._file
+            try:
+                if hasattr(self._file, 'close'):
+                    self._file.close()
+            finally:
+                del self._file
 
     def _read(self, size, read_method):
         """Read size bytes using read_method."""

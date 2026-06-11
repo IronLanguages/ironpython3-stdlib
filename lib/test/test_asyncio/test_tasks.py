@@ -75,6 +75,7 @@ class Dummy:
 class TaskTests(test_utils.TestCase):
 
     def setUp(self):
+        super().setUp()
         self.loop = self.new_test_loop()
 
     def test_other_loop_future(self):
@@ -91,6 +92,17 @@ class TaskTests(test_utils.TestCase):
                 self.loop.run_until_complete(run(fut))
         finally:
             other_loop.close()
+
+    def test_task_awaits_on_itself(self):
+        @asyncio.coroutine
+        def test():
+            yield from task
+
+        task = asyncio.ensure_future(test(), loop=self.loop)
+
+        with self.assertRaisesRegex(RuntimeError,
+                                    'Task cannot await on itself'):
+            self.loop.run_until_complete(task)
 
     def test_task_class(self):
         @asyncio.coroutine
@@ -552,6 +564,24 @@ class TaskTests(test_utils.TestCase):
             self.assertTrue(t._must_cancel)  # White-box test.
             # The sleep should be cancelled immediately.
             yield from asyncio.sleep(100, loop=loop)
+            return 12
+
+        t = asyncio.Task(task(), loop=loop)
+        self.assertRaises(
+            asyncio.CancelledError, loop.run_until_complete, t)
+        self.assertTrue(t.done())
+        self.assertFalse(t._must_cancel)  # White-box test.
+        self.assertFalse(t.cancel())
+
+    def test_cancel_at_end(self):
+        """coroutine end right after task is cancelled"""
+        loop = asyncio.new_event_loop()
+        self.set_event_loop(loop)
+
+        @asyncio.coroutine
+        def task():
+            t.cancel()
+            self.assertTrue(t._must_cancel)  # White-box test.
             return 12
 
         t = asyncio.Task(task(), loop=loop)
@@ -1364,6 +1394,8 @@ class TaskTests(test_utils.TestCase):
             yield
         self.assertTrue(asyncio.iscoroutinefunction(fn2))
 
+        self.assertFalse(asyncio.iscoroutinefunction(mock.Mock()))
+
     def test_yield_vs_yield_from(self):
         fut = asyncio.Future(loop=self.loop)
 
@@ -1723,6 +1755,37 @@ class TaskTests(test_utils.TestCase):
         wd['cw'] = cw  # Would fail without __weakref__ slot.
         cw.gen = None  # Suppress warning from __del__.
 
+    def test_corowrapper_throw(self):
+        # Issue 429: CoroWrapper.throw must be compatible with gen.throw
+        def foo():
+            value = None
+            while True:
+                try:
+                    value = yield value
+                except Exception as e:
+                    value = e
+
+        exception = Exception("foo")
+        cw = asyncio.coroutines.CoroWrapper(foo())
+        cw.send(None)
+        self.assertIs(exception, cw.throw(exception))
+
+        cw = asyncio.coroutines.CoroWrapper(foo())
+        cw.send(None)
+        self.assertIs(exception, cw.throw(Exception, exception))
+
+        cw = asyncio.coroutines.CoroWrapper(foo())
+        cw.send(None)
+        exception = cw.throw(Exception, "foo")
+        self.assertIsInstance(exception, Exception)
+        self.assertEqual(exception.args, ("foo", ))
+
+        cw = asyncio.coroutines.CoroWrapper(foo())
+        cw.send(None)
+        exception = cw.throw(Exception, "foo", None)
+        self.assertIsInstance(exception, Exception)
+        self.assertEqual(exception.args, ("foo", ))
+
     @unittest.skipUnless(PY34,
                          'need python 3.4 or later')
     def test_log_destroyed_pending_task(self):
@@ -1765,6 +1828,25 @@ class TaskTests(test_utils.TestCase):
         })
         mock_handler.reset_mock()
 
+    @mock.patch('asyncio.base_events.logger')
+    def test_tb_logger_not_called_after_cancel(self, m_log):
+        loop = asyncio.new_event_loop()
+        self.set_event_loop(loop)
+
+        @asyncio.coroutine
+        def coro():
+            raise TypeError
+
+        @asyncio.coroutine
+        def runner():
+            task = loop.create_task(coro())
+            yield from asyncio.sleep(0.05, loop=loop)
+            task.cancel()
+            task = None
+
+        loop.run_until_complete(runner())
+        self.assertFalse(m_log.error.called)
+
     @mock.patch('asyncio.coroutines.logger')
     def test_coroutine_never_yielded(self, m_log):
         with set_coroutine_debug(True):
@@ -1793,6 +1875,30 @@ class TaskTests(test_utils.TestCase):
                     re.escape(tb_filename), tb_lineno))
 
         self.assertRegex(message, re.compile(regex, re.DOTALL))
+
+    def test_return_coroutine_from_coroutine(self):
+        """Return of @asyncio.coroutine()-wrapped function generator object
+        from @asyncio.coroutine()-wrapped function should have same effect as
+        returning generator object or Future."""
+        def check():
+            @asyncio.coroutine
+            def outer_coro():
+                @asyncio.coroutine
+                def inner_coro():
+                    return 1
+
+                return inner_coro()
+
+            result = self.loop.run_until_complete(outer_coro())
+            self.assertEqual(result, 1)
+
+        # Test with debug flag cleared.
+        with set_coroutine_debug(False):
+            check()
+
+        # Test with debug flag set.
+        with set_coroutine_debug(True):
+            check()
 
     def test_task_source_traceback(self):
         self.loop.set_debug(True)
@@ -1833,10 +1939,41 @@ class TaskTests(test_utils.TestCase):
     def test_cancel_wait_for(self):
         self._test_cancel_wait_for(60.0)
 
+    def test_cancel_gather(self):
+        """Ensure that a gathering future refuses to be cancelled once all
+        children are done"""
+        loop = asyncio.new_event_loop()
+        self.addCleanup(loop.close)
+
+        fut = asyncio.Future(loop=loop)
+        # The indirection fut->child_coro is needed since otherwise the
+        # gathering task is done at the same time as the child future
+        def child_coro():
+            return (yield from fut)
+        gather_future = asyncio.gather(child_coro(), loop=loop)
+        gather_task = asyncio.ensure_future(gather_future, loop=loop)
+
+        cancel_result = None
+        def cancelling_callback(_):
+            nonlocal cancel_result
+            cancel_result = gather_task.cancel()
+        fut.add_done_callback(cancelling_callback)
+
+        fut.set_result(42) # calls the cancelling_callback after fut is done()
+
+        # At this point the task should complete.
+        loop.run_until_complete(gather_task)
+
+        # Python issue #26923: asyncio.gather drops cancellation
+        self.assertEqual(cancel_result, False)
+        self.assertFalse(gather_task.cancelled())
+        self.assertEqual(gather_task.result(), [42])
+
 
 class GatherTestsBase:
 
     def setUp(self):
+        super().setUp()
         self.one_loop = self.new_test_loop()
         self.other_loop = self.new_test_loop()
         self.set_event_loop(self.one_loop, cleanup=False)
@@ -2120,6 +2257,7 @@ class RunCoroutineThreadsafeTests(test_utils.TestCase):
     """Test case for asyncio.run_coroutine_threadsafe."""
 
     def setUp(self):
+        super().setUp()
         self.loop = asyncio.new_event_loop()
         self.set_event_loop(self.loop) # Will cleanup properly
 
@@ -2210,12 +2348,14 @@ class RunCoroutineThreadsafeTests(test_utils.TestCase):
 
 class SleepTests(test_utils.TestCase):
     def setUp(self):
+        super().setUp()
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(None)
 
     def tearDown(self):
         self.loop.close()
         self.loop = None
+        super().tearDown()
 
     def test_sleep_zero(self):
         result = 0
@@ -2235,175 +2375,6 @@ class SleepTests(test_utils.TestCase):
         self.loop.run_until_complete(coro())
         self.assertEqual(result, 11)
 
-
-class TimeoutTests(test_utils.TestCase):
-    def setUp(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(None)
-
-    def tearDown(self):
-        self.loop.close()
-        self.loop = None
-
-    def test_timeout(self):
-        canceled_raised = [False]
-
-        @asyncio.coroutine
-        def long_running_task():
-            try:
-                yield from asyncio.sleep(10, loop=self.loop)
-            except asyncio.CancelledError:
-                canceled_raised[0] = True
-                raise
-
-        @asyncio.coroutine
-        def go():
-            with self.assertRaises(asyncio.TimeoutError):
-                with asyncio.timeout(0.01, loop=self.loop) as t:
-                    yield from long_running_task()
-                    self.assertIs(t._loop, self.loop)
-
-        self.loop.run_until_complete(go())
-        self.assertTrue(canceled_raised[0], 'CancelledError was not raised')
-
-    def test_timeout_finish_in_time(self):
-        @asyncio.coroutine
-        def long_running_task():
-            yield from asyncio.sleep(0.01, loop=self.loop)
-            return 'done'
-
-        @asyncio.coroutine
-        def go():
-            with asyncio.timeout(0.1, loop=self.loop):
-                resp = yield from long_running_task()
-            self.assertEqual(resp, 'done')
-
-        self.loop.run_until_complete(go())
-
-    def test_timeout_gloabal_loop(self):
-        asyncio.set_event_loop(self.loop)
-
-        @asyncio.coroutine
-        def run():
-            with asyncio.timeout(0.1) as t:
-                yield from asyncio.sleep(0.01)
-                self.assertIs(t._loop, self.loop)
-
-        self.loop.run_until_complete(run())
-
-    def test_timeout_not_relevant_exception(self):
-        @asyncio.coroutine
-        def go():
-            yield from asyncio.sleep(0, loop=self.loop)
-            with self.assertRaises(KeyError):
-                with asyncio.timeout(0.1, loop=self.loop):
-                    raise KeyError
-
-        self.loop.run_until_complete(go())
-
-    def test_timeout_canceled_error_is_converted_to_timeout(self):
-        @asyncio.coroutine
-        def go():
-            yield from asyncio.sleep(0, loop=self.loop)
-            with self.assertRaises(asyncio.CancelledError):
-                with asyncio.timeout(0.001, loop=self.loop):
-                    raise asyncio.CancelledError
-
-        self.loop.run_until_complete(go())
-
-    def test_timeout_blocking_loop(self):
-        @asyncio.coroutine
-        def long_running_task():
-            time.sleep(0.05)
-            return 'done'
-
-        @asyncio.coroutine
-        def go():
-            with asyncio.timeout(0.01, loop=self.loop):
-                result = yield from long_running_task()
-            self.assertEqual(result, 'done')
-
-        self.loop.run_until_complete(go())
-
-    def test_for_race_conditions(self):
-        fut = asyncio.Future(loop=self.loop)
-        self.loop.call_later(0.1, fut.set_result('done'))
-
-        @asyncio.coroutine
-        def go():
-            with asyncio.timeout(0.2, loop=self.loop):
-                resp = yield from fut
-            self.assertEqual(resp, 'done')
-
-        self.loop.run_until_complete(go())
-
-    def test_timeout_time(self):
-        @asyncio.coroutine
-        def go():
-            foo_running = None
-
-            start = self.loop.time()
-            with self.assertRaises(asyncio.TimeoutError):
-                with asyncio.timeout(0.1, loop=self.loop):
-                    foo_running = True
-                    try:
-                        yield from asyncio.sleep(0.2, loop=self.loop)
-                    finally:
-                        foo_running = False
-
-            dt = self.loop.time() - start
-            # tolerate a small delta for slow delta or unstable clocks
-            self.assertTrue(0.09 < dt < 0.12, dt)
-            self.assertFalse(foo_running)
-
-        self.loop.run_until_complete(go())
-
-    def test_raise_runtimeerror_if_no_task(self):
-        with self.assertRaises(RuntimeError):
-            with asyncio.timeout(0.1, loop=self.loop):
-                pass
-
-    def test_outer_coro_is_not_cancelled(self):
-
-        has_timeout = [False]
-
-        @asyncio.coroutine
-        def outer():
-            try:
-                with asyncio.timeout(0.001, loop=self.loop):
-                    yield from asyncio.sleep(1, loop=self.loop)
-            except asyncio.TimeoutError:
-                has_timeout[0] = True
-
-        @asyncio.coroutine
-        def go():
-            task = asyncio.ensure_future(outer(), loop=self.loop)
-            yield from task
-            self.assertTrue(has_timeout[0])
-            self.assertFalse(task.cancelled())
-            self.assertTrue(task.done())
-
-        self.loop.run_until_complete(go())
-
-    def test_cancel_outer_coro(self):
-        fut = asyncio.Future(loop=self.loop)
-
-        @asyncio.coroutine
-        def outer():
-            fut.set_result(None)
-            yield from asyncio.sleep(1, loop=self.loop)
-
-        @asyncio.coroutine
-        def go():
-            task = asyncio.ensure_future(outer(), loop=self.loop)
-            yield from fut
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                yield from task
-            self.assertTrue(task.cancelled())
-            self.assertTrue(task.done())
-
-        self.loop.run_until_complete(go())
 
 if __name__ == '__main__':
     unittest.main()

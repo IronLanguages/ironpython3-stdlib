@@ -61,7 +61,7 @@
 #            though
 #    0.5.2 - fixed uname() to return '' instead of 'unknown' in all
 #            return values (the system uname command tends to return
-#            'unknown' instead of just leaving the field emtpy)
+#            'unknown' instead of just leaving the field empty)
 #    0.5.1 - included code for slackware dist; added exception handlers
 #            to cover up situations where platforms don't have os.popen
 #            (e.g. Mac) or fail on socket.gethostname(); fixed libc
@@ -116,6 +116,8 @@ __version__ = '1.0.7'
 import collections
 import sys, os, re, subprocess
 
+import warnings
+
 ### Globals & Constants
 
 # Determine the platform's /dev/null device
@@ -165,40 +167,39 @@ def libc_ver(executable=sys.executable, lib='', version='',
         # here to work around problems with Cygwin not being
         # able to open symlinks for reading
         executable = os.path.realpath(executable)
-    f = open(executable, 'rb')
-    binary = f.read(chunksize)
-    pos = 0
-    while 1:
-        if b'libc' in binary or b'GLIBC' in binary:
-            m = _libc_search.search(binary, pos)
-        else:
-            m = None
-        if not m:
-            binary = f.read(chunksize)
-            if not binary:
-                break
-            pos = 0
-            continue
-        libcinit, glibc, glibcversion, so, threads, soversion = [
-            s.decode('latin1') if s is not None else s
-            for s in m.groups()]
-        if libcinit and not lib:
-            lib = 'libc'
-        elif glibc:
-            if lib != 'glibc':
-                lib = 'glibc'
-                version = glibcversion
-            elif glibcversion > version:
-                version = glibcversion
-        elif so:
-            if lib != 'glibc':
+    with open(executable, 'rb') as f:
+        binary = f.read(chunksize)
+        pos = 0
+        while 1:
+            if b'libc' in binary or b'GLIBC' in binary:
+                m = _libc_search.search(binary, pos)
+            else:
+                m = None
+            if not m:
+                binary = f.read(chunksize)
+                if not binary:
+                    break
+                pos = 0
+                continue
+            libcinit, glibc, glibcversion, so, threads, soversion = [
+                s.decode('latin1') if s is not None else s
+                for s in m.groups()]
+            if libcinit and not lib:
                 lib = 'libc'
-                if soversion and soversion > version:
-                    version = soversion
-                if threads and version[-len(threads):] != threads:
-                    version = version + threads
-        pos = m.end()
-    f.close()
+            elif glibc:
+                if lib != 'glibc':
+                    lib = 'glibc'
+                    version = glibcversion
+                elif glibcversion > version:
+                    version = glibcversion
+            elif so:
+                if lib != 'glibc':
+                    lib = 'libc'
+                    if soversion and soversion > version:
+                        version = soversion
+                    if threads and version[-len(threads):] != threads:
+                        version = version + threads
+            pos = m.end()
     return lib, version
 
 def _dist_try_harder(distname, version, id):
@@ -300,6 +301,14 @@ def linux_distribution(distname='', version='', id='',
 
                        supported_dists=_supported_dists,
                        full_distribution_name=1):
+    import warnings
+    warnings.warn("dist() and linux_distribution() functions are deprecated "
+                  "in Python 3.5", PendingDeprecationWarning, stacklevel=2)
+    return _linux_distribution(distname, version, id, supported_dists,
+                               full_distribution_name)
+
+def _linux_distribution(distname, version, id, supported_dists,
+                        full_distribution_name):
 
     """ Tries to determine the name of the Linux OS distribution name.
 
@@ -366,9 +375,12 @@ def dist(distname='', version='', id='',
         args given as parameters.
 
     """
-    return linux_distribution(distname, version, id,
-                              supported_dists=supported_dists,
-                              full_distribution_name=0)
+    import warnings
+    warnings.warn("dist() and linux_distribution() functions are deprecated "
+                  "in Python 3.5", PendingDeprecationWarning, stacklevel=2)
+    return _linux_distribution(distname, version, id,
+                               supported_dists=supported_dists,
+                               full_distribution_name=0)
 
 def popen(cmd, mode='r', bufsize=-1):
 
@@ -428,7 +440,7 @@ def _syscmd_ver(system='', release='', version='',
     # Try some common cmd strings
     for cmd in ('ver', 'command /c ver', 'cmd /c ver'):
         try:
-            pipe = popen(cmd)
+            pipe = os.popen(cmd)
             info = pipe.read()
             if pipe.close():
                 raise OSError('command failed')
@@ -486,65 +498,6 @@ _WIN32_SERVER_RELEASES = {
     (6, None): "post2012ServerR2",
 }
 
-def _get_real_winver(maj, min, build):
-    if maj < 6 or (maj == 6 and min < 2):
-        return maj, min, build
-
-    from ctypes import (c_buffer, POINTER, byref, create_unicode_buffer,
-                        Structure, WinDLL)
-    from ctypes.wintypes import DWORD, HANDLE
-
-    class VS_FIXEDFILEINFO(Structure):
-        _fields_ = [
-            ("dwSignature", DWORD),
-            ("dwStrucVersion", DWORD),
-            ("dwFileVersionMS", DWORD),
-            ("dwFileVersionLS", DWORD),
-            ("dwProductVersionMS", DWORD),
-            ("dwProductVersionLS", DWORD),
-            ("dwFileFlagsMask", DWORD),
-            ("dwFileFlags", DWORD),
-            ("dwFileOS", DWORD),
-            ("dwFileType", DWORD),
-            ("dwFileSubtype", DWORD),
-            ("dwFileDateMS", DWORD),
-            ("dwFileDateLS", DWORD),
-        ]
-
-    kernel32 = WinDLL('kernel32')
-    version = WinDLL('version')
-
-    # We will immediately double the length up to MAX_PATH, but the
-    # path may be longer, so we retry until the returned string is
-    # shorter than our buffer.
-    name_len = actual_len = 130
-    while actual_len == name_len:
-        name_len *= 2
-        name = create_unicode_buffer(name_len)
-        actual_len = kernel32.GetModuleFileNameW(HANDLE(kernel32._handle),
-                                                 name, len(name))
-        if not actual_len:
-            return maj, min, build
-
-    size = version.GetFileVersionInfoSizeW(name, None)
-    if not size:
-        return maj, min, build
-
-    ver_block = c_buffer(size)
-    if (not version.GetFileVersionInfoW(name, None, size, ver_block) or
-        not ver_block):
-        return maj, min, build
-
-    pvi = POINTER(VS_FIXEDFILEINFO)()
-    if not version.VerQueryValueW(ver_block, "", byref(pvi), byref(DWORD())):
-        return maj, min, build
-
-    maj = pvi.contents.dwProductVersionMS >> 16
-    min = pvi.contents.dwProductVersionMS & 0xFFFF
-    build = pvi.contents.dwProductVersionLS >> 16
-
-    return maj, min, build
-
 def win32_ver(release='', version='', csd='', ptype=''):
     try:
         from sys import getwindowsversion
@@ -556,7 +509,7 @@ def win32_ver(release='', version='', csd='', ptype=''):
         from _winreg import OpenKeyEx, QueryValueEx, CloseKey, HKEY_LOCAL_MACHINE
 
     winver = getwindowsversion()
-    maj, min, build = _get_real_winver(*winver[:3])
+    maj, min, build = winver._platform_version or winver[:3]
     version = '{0}.{1}.{2}'.format(maj, min, build)
 
     release = (_WIN32_CLIENT_RELEASES.get((maj, min)) or
@@ -1134,9 +1087,11 @@ def processor():
 ### Various APIs for extracting information from sys.version
 
 _sys_version_parser = re.compile(
-    r'([\w.+]+)\s*'
-    '\(#?([^,]+),\s*([\w ]+),\s*([\w :]+)\)\s*'
-    '\[([^\]]+)\]?', re.ASCII)
+    r'([\w.+]+)\s*'  # "version<space>"
+    r'\(#?([^,]+)'  # "(#buildno"
+    r'(?:,\s*([\w ]*)'  # ", builddate"
+    r'(?:,\s*([\w :]*))?)?\)\s*'  # ", buildtime)<space>"
+    r'\[([^\]]+)\]?', re.ASCII)  # "[compiler]"
 
 _ironpython_sys_version_parser = re.compile(
     r'IronPython\s*'
@@ -1215,6 +1170,8 @@ def _sys_version(sys_version=None):
                 'failed to parse Jython sys.version: %s' %
                 repr(sys_version))
         version, buildno, builddate, buildtime, _ = match.groups()
+        if builddate is None:
+            builddate = ''
         compiler = sys.platform
 
     elif "PyPy" in sys_version:
@@ -1237,9 +1194,14 @@ def _sys_version(sys_version=None):
         version, buildno, builddate, buildtime, compiler = \
               match.groups()
         name = 'CPython'
-        builddate = builddate + ' ' + buildtime
+        if builddate is None:
+            builddate = ''
+        elif buildtime:
+            builddate = builddate + ' ' + buildtime
 
-    if hasattr(sys, '_mercurial'):
+    if hasattr(sys, '_git'):
+        _, branch, revision = sys._git
+    elif hasattr(sys, '_mercurial'):
         _, branch, revision = sys._mercurial
     elif hasattr(sys, 'subversion'):
         # sys.subversion was added in Python 2.5
@@ -1381,7 +1343,15 @@ def platform(aliased=0, terse=0):
 
     elif system in ('Linux',):
         # Linux based systems
-        distname, distversion, distid = dist('')
+        with warnings.catch_warnings():
+            # see issue #1322 for more information
+            warnings.filterwarnings(
+                'ignore',
+                'dist\(\) and linux_distribution\(\) '
+                'functions are deprecated .*',
+                PendingDeprecationWarning,
+            )
+            distname, distversion, distid = dist('')
         if distname and not terse:
             platform = _platform(system, release, machine, processor,
                                  'with',

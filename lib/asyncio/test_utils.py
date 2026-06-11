@@ -13,6 +13,8 @@ import tempfile
 import threading
 import time
 import unittest
+import weakref
+
 from unittest import mock
 
 from http.server import HTTPServer
@@ -31,6 +33,7 @@ from . import selectors
 from . import tasks
 from .coroutines import coroutine
 from .log import logger
+from test import support
 
 
 if sys.platform == 'win32':  # pragma: no cover
@@ -300,6 +303,8 @@ class TestLoop(base_events.BaseEventLoop):
         self.writers = {}
         self.reset_counters()
 
+        self._transports = weakref.WeakValueDictionary()
+
     def time(self):
         return self._time
 
@@ -318,10 +323,10 @@ class TestLoop(base_events.BaseEventLoop):
             else:  # pragma: no cover
                 raise AssertionError("Time generator is not finished")
 
-    def add_reader(self, fd, callback, *args):
+    def _add_reader(self, fd, callback, *args):
         self.readers[fd] = events.Handle(callback, args, self)
 
-    def remove_reader(self, fd):
+    def _remove_reader(self, fd):
         self.remove_reader_count[fd] += 1
         if fd in self.readers:
             del self.readers[fd]
@@ -337,10 +342,10 @@ class TestLoop(base_events.BaseEventLoop):
         assert handle._args == args, '{!r} != {!r}'.format(
             handle._args, args)
 
-    def add_writer(self, fd, callback, *args):
+    def _add_writer(self, fd, callback, *args):
         self.writers[fd] = events.Handle(callback, args, self)
 
-    def remove_writer(self, fd):
+    def _remove_writer(self, fd):
         self.remove_writer_count[fd] += 1
         if fd in self.writers:
             del self.writers[fd]
@@ -355,6 +360,36 @@ class TestLoop(base_events.BaseEventLoop):
             handle._callback, callback)
         assert handle._args == args, '{!r} != {!r}'.format(
             handle._args, args)
+
+    def _ensure_fd_no_transport(self, fd):
+        try:
+            transport = self._transports[fd]
+        except KeyError:
+            pass
+        else:
+            raise RuntimeError(
+                'File descriptor {!r} is used by transport {!r}'.format(
+                    fd, transport))
+
+    def add_reader(self, fd, callback, *args):
+        """Add a reader callback."""
+        self._ensure_fd_no_transport(fd)
+        return self._add_reader(fd, callback, *args)
+
+    def remove_reader(self, fd):
+        """Remove a reader callback."""
+        self._ensure_fd_no_transport(fd)
+        return self._remove_reader(fd)
+
+    def add_writer(self, fd, callback, *args):
+        """Add a writer callback.."""
+        self._ensure_fd_no_transport(fd)
+        return self._add_writer(fd, callback, *args)
+
+    def remove_writer(self, fd):
+        """Remove a writer callback."""
+        self._ensure_fd_no_transport(fd)
+        return self._remove_writer(fd)
 
     def reset_counters(self):
         self.remove_reader_count = collections.defaultdict(int)
@@ -415,12 +450,26 @@ class TestCase(unittest.TestCase):
         self.set_event_loop(loop)
         return loop
 
+    def unpatch_get_running_loop(self):
+        events._get_running_loop = self._get_running_loop
+
+    def setUp(self):
+        self._get_running_loop = events._get_running_loop
+        events._get_running_loop = lambda: None
+        self._thread_cleanup = support.threading_setup()
+
     def tearDown(self):
+        self.unpatch_get_running_loop()
+
         events.set_event_loop(None)
 
         # Detect CPython bug #23353: ensure that yield/yield-from is not used
         # in an except block of a generator
         self.assertEqual(sys.exc_info(), (None, None, None))
+
+        self.doCleanups()
+        support.threading_cleanup(*self._thread_cleanup)
+        support.reap_children()
 
     if not compat.PY34:
         # Python 3.3 compatibility

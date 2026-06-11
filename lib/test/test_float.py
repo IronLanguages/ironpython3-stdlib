@@ -98,15 +98,27 @@ class GeneralFloatCases(unittest.TestCase):
         self.assertEqual(float(memoryview(b'12.34')[1:4]), 2.3)
 
     def test_error_message(self):
-        testlist = ('\xbd', '123\xbd', '  123 456  ')
-        for s in testlist:
-            try:
+        def check(s):
+            with self.assertRaises(ValueError, msg='float(%r)' % (s,)) as cm:
                 float(s)
-            except ValueError as e:
-                self.assertIn(s.strip(), e.args[0])
-            else:
-                self.fail("Expected int(%r) to raise a ValueError", s)
+            self.assertEqual(str(cm.exception),
+                'could not convert string to float: %r' % (s,))
 
+        check('\xbd')
+        check('123\xbd')
+        check('  123 456  ')
+        check(b'  123 456  ')
+
+        # non-ascii digits (error came from non-digit '!')
+        check('\u0663\u0661\u0664!')
+        # embedded NUL
+        check('123\x00')
+        check('123\x00 245')
+        check('123\x00245')
+        # byte string with embedded NUL
+        check(b'123\x00')
+        # non-UTF-8 byte string
+        check(b'123\xa0')
 
     @support.run_with_locale('LC_NUMERIC', 'fr_FR', 'de_DE')
     def test_float_with_comma(self):
@@ -822,6 +834,14 @@ class RoundTestCase(unittest.TestCase):
             test(sfmt, NAN, ' nan')
             test(sfmt, -NAN, ' nan')
 
+    def test_None_ndigits(self):
+        for x in round(1.23), round(1.23, None), round(1.23, ndigits=None):
+            self.assertEqual(x, 1)
+            self.assertIsInstance(x, int)
+        for x in round(1.78), round(1.78, None), round(1.78, ndigits=None):
+            self.assertEqual(x, 2)
+            self.assertIsInstance(x, int)
+
 
 # Beginning with Python 2.6 float has cross platform compatible
 # ways to create and represent inf and nan
@@ -1347,19 +1367,24 @@ class HexFloatTestCase(unittest.TestCase):
             else:
                 self.identical(x, fromHex(toHex(x)))
 
+    def test_subclass(self):
+        class F(float):
+            def __new__(cls, value):
+                return float.__new__(cls, value + 1)
 
-def test_main():
-    support.run_unittest(
-        GeneralFloatCases,
-        FormatFunctionsTestCase,
-        UnknownFormatTestCase,
-        IEEEFormatTestCase,
-        FormatTestCase,
-        ReprTestCase,
-        RoundTestCase,
-        InfNanTest,
-        HexFloatTestCase,
-        )
+        f = F.fromhex((1.5).hex())
+        self.assertIs(type(f), F)
+        self.assertEqual(f, 2.5)
+
+        class F2(float):
+            def __init__(self, value):
+                self.foo = 'bar'
+
+        f = F2.fromhex((1.5).hex())
+        self.assertIs(type(f), F2)
+        self.assertEqual(f, 1.5)
+        self.assertEqual(getattr(f, 'foo', 'none'), 'bar')
+
 
 if __name__ == '__main__':
-    test_main()
+    unittest.main()

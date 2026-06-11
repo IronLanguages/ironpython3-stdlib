@@ -174,7 +174,7 @@ class Element:
         self._children = []
 
     def __repr__(self):
-        return "<Element %s at 0x%x>" % (repr(self.tag), id(self))
+        return "<%s %r at %#x>" % (self.__class__.__name__, self.tag, id(self))
 
     def makeelement(self, tag, attrib):
         """Create a new element with the same type.
@@ -428,12 +428,14 @@ class Element:
         tag = self.tag
         if not isinstance(tag, str) and tag is not None:
             return
-        if self.text:
-            yield self.text
+        t = self.text
+        if t:
+            yield t
         for e in self:
             yield from e.itertext()
-            if e.tail:
-                yield e.tail
+            t = e.tail
+            if t:
+                yield t
 
 
 def SubElement(parent, tag, attrib={}, **extra):
@@ -509,7 +511,7 @@ class QName:
     def __str__(self):
         return self.text
     def __repr__(self):
-        return '<QName %r>' % (self.text,)
+        return '<%s %r>' % (self.__class__.__name__, self.text)
     def __hash__(self):
         return hash(self.text)
     def __le__(self, other):
@@ -532,10 +534,6 @@ class QName:
         if isinstance(other, QName):
             return self.text == other.text
         return self.text == other
-    def __ne__(self, other):
-        if isinstance(other, QName):
-            return self.text != other.text
-        return self.text != other
 
 # --------------------------------------------------------------------
 
@@ -1085,8 +1083,19 @@ def _escape_attrib(text):
             text = text.replace(">", "&gt;")
         if "\"" in text:
             text = text.replace("\"", "&quot;")
+        # The following business with carriage returns is to satisfy
+        # Section 2.11 of the XML specification, stating that 
+        # CR or CR LN should be replaced with just LN
+        # http://www.w3.org/TR/REC-xml/#sec-line-ends
+        if "\r\n" in text:
+            text = text.replace("\r\n", "\n")
+        if "\r" in text:
+            text = text.replace("\r", "\n")
+        #The following four lines are issue 17582
         if "\n" in text:
             text = text.replace("\n", "&#10;")
+        if "\t" in text:
+            text = text.replace("\t", "&#09;")
         return text
     except (TypeError, AttributeError):
         _raise_serialization_error(text)
@@ -1456,7 +1465,7 @@ class TreeBuilder:
 class XMLParser:
     """Element structure builder for XML source data based on the expat parser.
 
-    *html* are predefined HTML entities (not supported currently),
+    *html* are predefined HTML entities (deprecated and not supported),
     *target* is an optional target object which defaults to an instance of the
     standard TreeBuilder class, *encoding* is an optional encoding string
     which if given, overrides the encoding specified in the XML file:

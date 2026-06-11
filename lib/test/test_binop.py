@@ -58,7 +58,7 @@ class Rat(object):
     den = property(_get_den, None)
 
     def __repr__(self):
-        """Convert a Rat to an string resembling a Rat constructor call."""
+        """Convert a Rat to a string resembling a Rat constructor call."""
         return "Rat(%d, %d)" % (self.__num, self.__den)
 
     def __str__(self):
@@ -389,9 +389,5 @@ class OperationOrderTests(unittest.TestCase):
         self.assertEqual(op_sequence(le, B, V), ['B.__le__', 'V.__ge__'])
 
 
-def test_main():
-    support.run_unittest(RatTestCase, OperationOrderTests)
-
-
 if __name__ == "__main__":
-    test_main()
+    unittest.main()

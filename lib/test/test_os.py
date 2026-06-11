@@ -9,6 +9,7 @@ import contextlib
 import decimal
 import errno
 import fractions
+import getpass
 import itertools
 import locale
 import mmap
@@ -40,8 +41,34 @@ try:
     import fcntl
 except ImportError:
     fcntl = None
+try:
+    import _winapi
+except ImportError:
+    _winapi = None
+try:
+    import grp
+    groups = [g.gr_gid for g in grp.getgrall() if getpass.getuser() in g.gr_mem]
+    if hasattr(os, 'getgid'):
+        process_gid = os.getgid()
+        if process_gid not in groups:
+            groups.append(process_gid)
+except ImportError:
+    groups = []
+try:
+    import pwd
+    all_users = [u.pw_uid for u in pwd.getpwall()]
+except ImportError:
+    all_users = []
+try:
+    from _testcapi import INT_MAX, PY_SSIZE_T_MAX
+except ImportError:
+    INT_MAX = PY_SSIZE_T_MAX = sys.maxsize
 
-from test.script_helper import assert_python_ok
+from test.support.script_helper import assert_python_ok
+
+root_in_posix = False
+if hasattr(os, 'geteuid'):
+    root_in_posix = (os.geteuid() == 0)
 
 # Detect whether we're on a Linux system that uses the (now outdated
 # and unmaintained) linuxthreads threading library.  There's an issue
@@ -54,6 +81,11 @@ else:
 
 # Issue #14110: Some tests fail on FreeBSD if the user is in the wheel group.
 HAVE_WHEEL_GROUP = sys.platform.startswith('freebsd') and os.getgid() == 0
+
+def create_file(filename, content=b'content'):
+    with open(filename, "xb", 0) as fp:
+        fp.write(content)
+
 
 # Tests creating TESTFN
 class FileTests(unittest.TestCase):
@@ -105,6 +137,26 @@ class FileTests(unittest.TestCase):
             s = os.read(fd, 4)
             self.assertEqual(type(s), bytes)
             self.assertEqual(s, b"spam")
+
+    @support.cpython_only
+    # Skip the test on 32-bit platforms: the number of bytes must fit in a
+    # Py_ssize_t type
+    @unittest.skipUnless(INT_MAX < PY_SSIZE_T_MAX,
+                         "needs INT_MAX < PY_SSIZE_T_MAX")
+    @support.bigmemtest(size=INT_MAX + 10, memuse=1, dry_run=False)
+    def test_large_read(self, size):
+        with open(support.TESTFN, "wb") as fp:
+            fp.write(b'test')
+        self.addCleanup(support.unlink, support.TESTFN)
+
+        # Issue #21932: Make sure that os.read() does not raise an
+        # OverflowError for size larger than INT_MAX
+        with open(support.TESTFN, "rb") as fp:
+            data = os.read(fp.fileno(), size)
+
+        # The test does not try to read more than 2 GB at once because the
+        # operating system is free to return less bytes than requested.
+        self.assertEqual(data, b'test')
 
     def test_write(self):
         # os.write() accepts bytes- and buffer-like objects but not strings
@@ -179,15 +231,9 @@ class FileTests(unittest.TestCase):
 # Test attributes on return values from os.*stat* family.
 class StatAttributeTests(unittest.TestCase):
     def setUp(self):
-        os.mkdir(support.TESTFN)
-        self.fname = os.path.join(support.TESTFN, "f1")
-        f = open(self.fname, 'wb')
-        f.write(b"ABC")
-        f.close()
-
-    def tearDown(self):
-        os.unlink(self.fname)
-        os.rmdir(support.TESTFN)
+        self.fname = support.TESTFN
+        self.addCleanup(support.unlink, self.fname)
+        create_file(self.fname, b"ABC")
 
     @unittest.skipUnless(hasattr(os, 'stat'), 'test needs os.stat()')
     def check_stat_attributes(self, fname):
@@ -362,6 +408,53 @@ class StatAttributeTests(unittest.TestCase):
         with self.assertRaises(OSError) as ctx:
             os.stat(r)
         self.assertEqual(ctx.exception.errno, errno.EBADF)
+
+    def check_file_attributes(self, result):
+        self.assertTrue(hasattr(result, 'st_file_attributes'))
+        self.assertTrue(isinstance(result.st_file_attributes, int))
+        self.assertTrue(0 <= result.st_file_attributes <= 0xFFFFFFFF)
+
+    @unittest.skipUnless(sys.platform == "win32",
+                         "st_file_attributes is Win32 specific")
+    def test_file_attributes(self):
+        # test file st_file_attributes (FILE_ATTRIBUTE_DIRECTORY not set)
+        result = os.stat(self.fname)
+        self.check_file_attributes(result)
+        self.assertEqual(
+            result.st_file_attributes & stat.FILE_ATTRIBUTE_DIRECTORY,
+            0)
+
+        # test directory st_file_attributes (FILE_ATTRIBUTE_DIRECTORY set)
+        dirname = support.TESTFN + "dir"
+        os.mkdir(dirname)
+        self.addCleanup(os.rmdir, dirname)
+
+        result = os.stat(dirname)
+        self.check_file_attributes(result)
+        self.assertEqual(
+            result.st_file_attributes & stat.FILE_ATTRIBUTE_DIRECTORY,
+            stat.FILE_ATTRIBUTE_DIRECTORY)
+
+    @unittest.skipUnless(sys.platform == "win32", "Win32 specific tests")
+    def test_access_denied(self):
+        # Default to FindFirstFile WIN32_FIND_DATA when access is
+        # denied. See issue 28075.
+        # os.environ['TEMP'] should be located on a volume that
+        # supports file ACLs.
+        fname = os.path.join(os.environ['TEMP'], self.fname)
+        self.addCleanup(support.unlink, fname)
+        create_file(fname, b'ABC')
+        # Deny the right to [S]YNCHRONIZE on the file to
+        # force CreateFile to fail with ERROR_ACCESS_DENIED.
+        DETACHED_PROCESS = 8
+        subprocess.check_call(
+            # bpo-30584: Use security identifier *S-1-5-32-545 instead
+            # of localized "Users" to not depend on the locale.
+            ['icacls.exe', fname, '/deny', '*S-1-5-32-545:(S)'],
+            creationflags=DETACHED_PROCESS
+        )
+        result = os.stat(fname)
+        self.assertNotEqual(result.st_size, 0)
 
 
 class UtimeTests(unittest.TestCase):
@@ -716,18 +809,40 @@ class EnvironTests(mapping_tests.BasicTestMappingProtocol):
         self.assertIs(cm.exception.args[0], missing)
         self.assertTrue(cm.exception.__suppress_context__)
 
+    def _test_environ_iteration(self, collection):
+        iterator = iter(collection)
+        new_key = "__new_key__"
+
+        next(iterator)  # start iteration over os.environ.items
+
+        # add a new key in os.environ mapping
+        os.environ[new_key] = "test_environ_iteration"
+
+        try:
+            next(iterator)  # force iteration over modified mapping
+            self.assertEqual(os.environ[new_key], "test_environ_iteration")
+        finally:
+            del os.environ[new_key]
+
+    def test_iter_error_when_changing_os_environ(self):
+        self._test_environ_iteration(os.environ)
+
+    def test_iter_error_when_changing_os_environ_items(self):
+        self._test_environ_iteration(os.environ.items())
+
+    def test_iter_error_when_changing_os_environ_values(self):
+        self._test_environ_iteration(os.environ.values())
+
 
 class WalkTests(unittest.TestCase):
     """Tests for os.walk()."""
 
     # Wrapper to hide minor differences between os.walk and os.fwalk
     # to tests both functions with the same code base
-    def walk(self, directory, topdown=True, follow_symlinks=False):
-        walk_it = os.walk(directory,
-                          topdown=topdown,
-                          followlinks=follow_symlinks)
-        for root, dirs, files in walk_it:
-            yield (root, dirs, files)
+    def walk(self, top, **kwargs):
+        if 'follow_symlinks' in kwargs:
+            kwargs['followlinks'] = kwargs.pop('follow_symlinks')
+        return os.walk(top, **kwargs)
 
     def setUp(self):
         join = os.path.join
@@ -741,46 +856,66 @@ class WalkTests(unittest.TestCase):
         #           SUB11/          no kids
         #         SUB2/             a file kid and a dirsymlink kid
         #           tmp3
+        #           SUB21/          not readable
+        #             tmp5
         #           link/           a symlink to TESTFN.2
         #           broken_link
+        #           broken_link2
+        #           broken_link3
         #       TEST2/
         #         tmp4              a lone file
         self.walk_path = join(support.TESTFN, "TEST1")
         self.sub1_path = join(self.walk_path, "SUB1")
         self.sub11_path = join(self.sub1_path, "SUB11")
         sub2_path = join(self.walk_path, "SUB2")
+        self.sub21_path = join(sub2_path, "SUB21")
         tmp1_path = join(self.walk_path, "tmp1")
         tmp2_path = join(self.sub1_path, "tmp2")
         tmp3_path = join(sub2_path, "tmp3")
+        tmp5_path = join(self.sub21_path, "tmp3")
         self.link_path = join(sub2_path, "link")
         t2_path = join(support.TESTFN, "TEST2")
         tmp4_path = join(support.TESTFN, "TEST2", "tmp4")
         broken_link_path = join(sub2_path, "broken_link")
+        broken_link2_path = join(sub2_path, "broken_link2")
+        broken_link3_path = join(sub2_path, "broken_link3")
 
         # Create stuff.
         os.makedirs(self.sub11_path)
         os.makedirs(sub2_path)
+        os.makedirs(self.sub21_path)
         os.makedirs(t2_path)
 
-        for path in tmp1_path, tmp2_path, tmp3_path, tmp4_path:
-            f = open(path, "w")
-            f.write("I'm " + path + " and proud of it.  Blame test_os.\n")
-            f.close()
+        for path in tmp1_path, tmp2_path, tmp3_path, tmp4_path, tmp5_path:
+            with open(path, "x") as f:
+                f.write("I'm " + path + " and proud of it.  Blame test_os.\n")
 
         if support.can_symlink():
             os.symlink(os.path.abspath(t2_path), self.link_path)
             os.symlink('broken', broken_link_path, True)
-            if os.path.isdir(broken_link_path):
-                # On Windows a symlink can has the FILE_ATTRIBUTE_DIRECTORY flag.
-                self.sub2_tree = (sub2_path, ["broken_link", "link"], ["tmp3"])
-            else:
-                self.sub2_tree = (sub2_path, ["link"], ["broken_link", "tmp3"])
+            os.symlink(join('tmp3', 'broken'), broken_link2_path, True)
+            os.symlink(join('SUB21', 'tmp5'), broken_link3_path, True)
+            self.sub2_tree = (sub2_path, ["SUB21", "link"],
+                              ["broken_link", "broken_link2", "broken_link3",
+                               "tmp3"])
         else:
             self.sub2_tree = (sub2_path, [], ["tmp3"])
 
+        os.chmod(self.sub21_path, 0)
+        try:
+            os.listdir(self.sub21_path)
+        except PermissionError:
+            pass
+        else:
+            os.chmod(self.sub21_path, stat.S_IRWXU)
+            os.unlink(tmp5_path)
+            os.rmdir(self.sub21_path)
+            self.sub21_path = None
+            del self.sub2_tree[1][:1]
+
     def test_walk_topdown(self):
         # Walk top-down.
-        all = list(os.walk(self.walk_path))
+        all = list(self.walk(self.walk_path))
 
         self.assertEqual(len(all), 4)
         # We can't know which order SUB1 and SUB2 will appear in.
@@ -789,6 +924,7 @@ class WalkTests(unittest.TestCase):
         flipped = all[0][1][0] != "SUB1"
         all[0][1].sort()
         all[3 - 2 * flipped][-1].sort()
+        all[3 - 2 * flipped][1].sort()
         self.assertEqual(all[0], (self.walk_path, ["SUB1", "SUB2"], ["tmp1"]))
         self.assertEqual(all[1 + flipped], (self.sub1_path, ["SUB11"], ["tmp2"]))
         self.assertEqual(all[2 + flipped], (self.sub11_path, [], []))
@@ -809,6 +945,7 @@ class WalkTests(unittest.TestCase):
                          (self.walk_path, ["SUB2"], ["tmp1"]))
 
         all[1][-1].sort()
+        all[1][1].sort()
         self.assertEqual(all[1], self.sub2_tree)
 
     def test_walk_bottom_up(self):
@@ -822,6 +959,7 @@ class WalkTests(unittest.TestCase):
         flipped = all[3][1][0] != "SUB1"
         all[3][1].sort()
         all[2 - 2 * flipped][-1].sort()
+        all[2 - 2 * flipped][1].sort()
         self.assertEqual(all[3],
                          (self.walk_path, ["SUB1", "SUB2"], ["tmp1"]))
         self.assertEqual(all[flipped],
@@ -850,6 +988,8 @@ class WalkTests(unittest.TestCase):
         # Windows, which doesn't have a recursive delete command.  The
         # (not so) subtlety is that rmdir will fail unless the dir's
         # kids are removed first, so bottom up is essential.
+        if self.sub21_path:
+            os.chmod(self.sub21_path, stat.S_IRWXU)
         for root, dirs, files in os.walk(support.TESTFN, topdown=False):
             for name in files:
                 os.remove(os.path.join(root, name))
@@ -861,18 +1001,35 @@ class WalkTests(unittest.TestCase):
                     os.remove(dirname)
         os.rmdir(support.TESTFN)
 
+    def test_walk_bad_dir(self):
+        # Walk top-down.
+        errors = []
+        walk_it = self.walk(self.walk_path, onerror=errors.append)
+        root, dirs, files = next(walk_it)
+        self.assertEqual(errors, [])
+        dir1 = 'SUB1'
+        path1 = os.path.join(root, dir1)
+        path1new = os.path.join(root, dir1 + '.new')
+        os.rename(path1, path1new)
+        try:
+            roots = [r for r, d, f in walk_it]
+            self.assertTrue(errors)
+            self.assertNotIn(path1, roots)
+            self.assertNotIn(path1new, roots)
+            for dir2 in dirs:
+                if dir2 != dir1:
+                    self.assertIn(os.path.join(root, dir2), roots)
+        finally:
+            os.rename(path1new, path1)
+
 
 @unittest.skipUnless(hasattr(os, 'fwalk'), "Test needs os.fwalk()")
 class FwalkTests(WalkTests):
     """Tests for os.fwalk()."""
 
-    def walk(self, directory, topdown=True, follow_symlinks=False):
-        walk_it = os.fwalk(directory,
-                           topdown=topdown,
-                           follow_symlinks=follow_symlinks)
-        for root, dirs, files, root_fd in walk_it:
+    def walk(self, top, **kwargs):
+        for root, dirs, files, root_fd in os.fwalk(top, **kwargs):
             yield (root, dirs, files)
-
 
     def _compare_to_walk(self, walk_kwargs, fwalk_kwargs):
         """
@@ -933,6 +1090,8 @@ class FwalkTests(WalkTests):
 
     def tearDown(self):
         # cleanup
+        if self.sub21_path:
+            os.chmod(self.sub21_path, stat.S_IRWXU)
         for root, dirs, files, rootfd in os.fwalk(support.TESTFN, topdown=False):
             for name in files:
                 os.unlink(name, dir_fd=rootfd)
@@ -943,6 +1102,30 @@ class FwalkTests(WalkTests):
                 else:
                     os.unlink(name, dir_fd=rootfd)
         os.rmdir(support.TESTFN)
+
+class BytesWalkTests(WalkTests):
+    """Tests for os.walk() with bytes."""
+    def setUp(self):
+        super().setUp()
+        self.stack = contextlib.ExitStack()
+        if os.name == 'nt':
+            self.stack.enter_context(warnings.catch_warnings())
+            warnings.simplefilter("ignore", DeprecationWarning)
+
+    def tearDown(self):
+        self.stack.close()
+        super().tearDown()
+
+    def walk(self, top, **kwargs):
+        if 'follow_symlinks' in kwargs:
+            kwargs['followlinks'] = kwargs.pop('follow_symlinks')
+        for broot, bdirs, bfiles in os.walk(os.fsencode(top), **kwargs):
+            root = os.fsdecode(broot)
+            dirs = list(map(os.fsdecode, bdirs))
+            files = list(map(os.fsdecode, bfiles))
+            yield (root, dirs, files)
+            bdirs[:] = list(map(os.fsencode, dirs))
+            bfiles[:] = list(map(os.fsencode, files))
 
 
 class MakedirTests(unittest.TestCase):
@@ -977,17 +1160,6 @@ class MakedirTests(unittest.TestCase):
 
         # Issue #25583: A drive root could raise PermissionError on Windows
         os.makedirs(os.path.abspath('/'), exist_ok=True)
-
-    @unittest.skipUnless(hasattr(os, 'chown'), 'test needs os.chown')
-    def test_chown_uid_gid_arguments_must_be_index(self):
-        stat = os.stat(support.TESTFN)
-        uid = stat.st_uid
-        gid = stat.st_gid
-        for value in (-1.0, -1j, decimal.Decimal(-1), fractions.Fraction(-2, 2)):
-            self.assertRaises(TypeError, os.chown, support.TESTFN, value, gid)
-            self.assertRaises(TypeError, os.chown, support.TESTFN, uid, value)
-        self.assertIsNone(os.chown(support.TESTFN, uid, gid))
-        self.assertIsNone(os.chown(support.TESTFN, -1, -1))
 
     def test_exist_ok_s_isgid_directory(self):
         path = os.path.join(support.TESTFN, 'dir1')
@@ -1037,6 +1209,60 @@ class MakedirTests(unittest.TestCase):
             path = os.path.dirname(path)
 
         os.removedirs(path)
+
+
+@unittest.skipUnless(hasattr(os, 'chown'), "Test needs chown")
+class ChownFileTests(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        os.mkdir(support.TESTFN)
+
+    def test_chown_uid_gid_arguments_must_be_index(self):
+        stat = os.stat(support.TESTFN)
+        uid = stat.st_uid
+        gid = stat.st_gid
+        for value in (-1.0, -1j, decimal.Decimal(-1), fractions.Fraction(-2, 2)):
+            self.assertRaises(TypeError, os.chown, support.TESTFN, value, gid)
+            self.assertRaises(TypeError, os.chown, support.TESTFN, uid, value)
+        self.assertIsNone(os.chown(support.TESTFN, uid, gid))
+        self.assertIsNone(os.chown(support.TESTFN, -1, -1))
+
+    @unittest.skipUnless(len(groups) > 1, "test needs more than one group")
+    def test_chown(self):
+        gid_1, gid_2 = groups[:2]
+        uid = os.stat(support.TESTFN).st_uid
+        os.chown(support.TESTFN, uid, gid_1)
+        gid = os.stat(support.TESTFN).st_gid
+        self.assertEqual(gid, gid_1)
+        os.chown(support.TESTFN, uid, gid_2)
+        gid = os.stat(support.TESTFN).st_gid
+        self.assertEqual(gid, gid_2)
+
+    @unittest.skipUnless(root_in_posix and len(all_users) > 1,
+                         "test needs root privilege and more than one user")
+    def test_chown_with_root(self):
+        uid_1, uid_2 = all_users[:2]
+        gid = os.stat(support.TESTFN).st_gid
+        os.chown(support.TESTFN, uid_1, gid)
+        uid = os.stat(support.TESTFN).st_uid
+        self.assertEqual(uid, uid_1)
+        os.chown(support.TESTFN, uid_2, gid)
+        uid = os.stat(support.TESTFN).st_uid
+        self.assertEqual(uid, uid_2)
+
+    @unittest.skipUnless(not root_in_posix and len(all_users) > 1,
+                         "test needs non-root account and more than one user")
+    def test_chown_without_permission(self):
+        uid_1, uid_2 = all_users[:2]
+        gid = os.stat(support.TESTFN).st_gid
+        with self.assertRaises(PermissionError):
+            os.chown(support.TESTFN, uid_1, gid)
+            os.chown(support.TESTFN, uid_2, gid)
+
+    @classmethod
+    def tearDownClass(cls):
+        os.rmdir(support.TESTFN)
 
 
 class RemoveDirsTests(unittest.TestCase):
@@ -1121,10 +1347,15 @@ class URandomTests(unittest.TestCase):
         self.assertNotEqual(data1, data2)
 
 
-HAVE_GETENTROPY = (sysconfig.get_config_var('HAVE_GETENTROPY') == 1)
+# os.urandom() doesn't use a file descriptor when it is implemented with the
+# getentropy() function, the getrandom() function or the getrandom() syscall
+OS_URANDOM_DONT_USE_FD = (
+    sysconfig.get_config_var('HAVE_GETENTROPY') == 1
+    or sysconfig.get_config_var('HAVE_GETRANDOM') == 1
+    or sysconfig.get_config_var('HAVE_GETRANDOM_SYSCALL') == 1)
 
-@unittest.skipIf(HAVE_GETENTROPY,
-                 "getentropy() does not use a file descriptor")
+@unittest.skipIf(OS_URANDOM_DONT_USE_FD ,
+                 "os.random() does not use a file descriptor")
 class URandomFDTests(unittest.TestCase):
     @unittest.skipUnless(resource, "test requires the resource module")
     def test_urandom_failure(self):
@@ -1155,8 +1386,10 @@ class URandomFDTests(unittest.TestCase):
         code = """if 1:
             import os
             import sys
+            import test.support
             os.urandom(4)
-            os.closerange(3, 256)
+            with test.support.SuppressCrashReport():
+                os.closerange(3, 256)
             sys.stdout.buffer.write(os.urandom(4))
             """
         rc, out, err = assert_python_ok('-Sc', code)
@@ -1170,16 +1403,18 @@ class URandomFDTests(unittest.TestCase):
         code = """if 1:
             import os
             import sys
+            import test.support
             os.urandom(4)
-            for fd in range(3, 256):
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-                else:
-                    # Found the urandom fd (XXX hopefully)
-                    break
-            os.closerange(3, 256)
+            with test.support.SuppressCrashReport():
+                for fd in range(3, 256):
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    else:
+                        # Found the urandom fd (XXX hopefully)
+                        break
+                os.closerange(3, 256)
             with open({TESTFN!r}, 'rb') as f:
                 os.dup2(f.fileno(), fd)
                 sys.stdout.buffer.write(os.urandom(4))
@@ -1290,6 +1525,27 @@ class ExecTests(unittest.TestCase):
         if os.name != "nt":
             self._test_internal_execvpe(bytes)
 
+    def test_execve_invalid_env(self):
+        args = [sys.executable, '-c', 'pass']
+
+        # null character in the enviroment variable name
+        newenv = os.environ.copy()
+        newenv["FRUIT\0VEGETABLE"] = "cabbage"
+        with self.assertRaises(ValueError):
+            os.execve(args[0], args, newenv)
+
+        # null character in the enviroment variable value
+        newenv = os.environ.copy()
+        newenv["FRUIT"] = "orange\0VEGETABLE=cabbage"
+        with self.assertRaises(ValueError):
+            os.execve(args[0], args, newenv)
+
+        # equal character in the enviroment variable name
+        newenv = os.environ.copy()
+        newenv["FRUIT=ORANGE"] = "lemon"
+        with self.assertRaises(ValueError):
+            os.execve(args[0], args, newenv)
+
 
 @unittest.skipUnless(sys.platform == "win32", "Win32 specific tests")
 class Win32ErrorTests(unittest.TestCase):
@@ -1320,7 +1576,7 @@ class TestInvalidFD(unittest.TestCase):
     singles = ["fchdir", "dup", "fdopen", "fdatasync", "fstat",
                "fstatvfs", "fsync", "tcgetpgrp", "ttyname"]
     #singles.append("close")
-    #We omit close because it doesn'r raise an exception on some platforms
+    #We omit close because it doesn't raise an exception on some platforms
     def get_single(f):
         def helper(self):
             if  hasattr(os, f):
@@ -1404,6 +1660,16 @@ class TestInvalidFD(unittest.TestCase):
     @unittest.skipUnless(hasattr(os, 'writev'), 'test needs os.writev()')
     def test_writev(self):
         self.check(os.writev, [b'abc'])
+
+    def test_inheritable(self):
+        self.check(os.get_inheritable)
+        self.check(os.set_inheritable, True)
+
+    @unittest.skipUnless(hasattr(os, 'get_blocking'),
+                         'needs os.get_blocking() and os.set_blocking()')
+    def test_blocking(self):
+        self.check(os.get_blocking)
+        self.check(os.set_blocking, True)
 
 
 class LinkTests(unittest.TestCase):
@@ -1851,8 +2117,6 @@ class Win32SymlinkTests(unittest.TestCase):
             os.remove(file1)
             shutil.rmtree(level1)
 
-    @unittest.skip('Python 3.4 will crash safely on this buffer '
-        'overflow, but still crashes')
     def test_buffer_overflow(self):
         # Older versions would have a buffer overflow when detecting
         # whether a link source was a directory. This test ensures we
@@ -1878,6 +2142,8 @@ class Win32SymlinkTests(unittest.TestCase):
                 except OSError:
                     pass
             # Also test with bytes, since that is a separate code path.
+            # However, because of the stack layout, it is not possible
+            # to exploit the overflow on Python 3.5 using bytes
             try:
                 os.symlink(os.fsencode(src), os.fsencode(dest))
             except ValueError:
@@ -1890,6 +2156,37 @@ class Win32SymlinkTests(unittest.TestCase):
                     os.remove(dest)
                 except OSError:
                     pass
+
+
+@unittest.skipUnless(sys.platform == "win32", "Win32 specific tests")
+class Win32JunctionTests(unittest.TestCase):
+    junction = 'junctiontest'
+    junction_target = os.path.dirname(os.path.abspath(__file__))
+
+    def setUp(self):
+        assert os.path.exists(self.junction_target)
+        assert not os.path.exists(self.junction)
+
+    def tearDown(self):
+        if os.path.exists(self.junction):
+            # os.rmdir delegates to Windows' RemoveDirectoryW,
+            # which removes junction points safely.
+            os.rmdir(self.junction)
+
+    def test_create_junction(self):
+        _winapi.CreateJunction(self.junction_target, self.junction)
+        self.assertTrue(os.path.exists(self.junction))
+        self.assertTrue(os.path.isdir(self.junction))
+
+        # Junctions are not recognized as links.
+        self.assertFalse(os.path.islink(self.junction))
+
+    def test_unlink_removes_junction(self):
+        _winapi.CreateJunction(self.junction_target, self.junction)
+        self.assertTrue(os.path.exists(self.junction))
+
+        os.unlink(self.junction)
+        self.assertFalse(os.path.exists(self.junction))
 
 
 @support.skip_unless_symlink
@@ -1964,6 +2261,68 @@ class PidTests(unittest.TestCase):
         stdout, _ = p.communicate()
         # We are the parent of our subprocess
         self.assertEqual(int(stdout), os.getpid())
+
+    def test_waitpid(self):
+        args = [sys.executable, '-c', 'pass']
+        pid = os.spawnv(os.P_NOWAIT, args[0], args)
+        status = os.waitpid(pid, 0)
+        self.assertEqual(status, (pid, 0))
+
+
+class SpawnTests(unittest.TestCase):
+    def _test_invalid_env(self, spawn):
+        args = [sys.executable, '-c', 'pass']
+
+        # null character in the enviroment variable name
+        newenv = os.environ.copy()
+        newenv["FRUIT\0VEGETABLE"] = "cabbage"
+        try:
+            exitcode = spawn(os.P_WAIT, args[0], args, newenv)
+        except ValueError:
+            pass
+        else:
+            self.assertEqual(exitcode, 127)
+
+        # null character in the enviroment variable value
+        newenv = os.environ.copy()
+        newenv["FRUIT"] = "orange\0VEGETABLE=cabbage"
+        try:
+            exitcode = spawn(os.P_WAIT, args[0], args, newenv)
+        except ValueError:
+            pass
+        else:
+            self.assertEqual(exitcode, 127)
+
+        # equal character in the enviroment variable name
+        newenv = os.environ.copy()
+        newenv["FRUIT=ORANGE"] = "lemon"
+        try:
+            exitcode = spawn(os.P_WAIT, args[0], args, newenv)
+        except ValueError:
+            pass
+        else:
+            self.assertEqual(exitcode, 127)
+
+        # equal character in the enviroment variable value
+        filename = support.TESTFN
+        self.addCleanup(support.unlink, filename)
+        with open(filename, "w") as fp:
+            fp.write('import sys, os\n'
+                     'if os.getenv("FRUIT") != "orange=lemon":\n'
+                     '    raise AssertionError')
+        args = [sys.executable, filename]
+        newenv = os.environ.copy()
+        newenv["FRUIT"] = "orange=lemon"
+        exitcode = spawn(os.P_WAIT, args[0], args, newenv)
+        self.assertEqual(exitcode, 0)
+
+    @unittest.skipUnless(hasattr(os, 'spawnve'), "test needs os.spawnve")
+    def test_spawnve_invalid_env(self):
+        self._test_invalid_env(os.spawnve)
+
+    @unittest.skipUnless(hasattr(os, 'spawnvpe'), "test needs os.spawnvpe")
+    def test_spawnvpe_invalid_env(self):
+        self._test_invalid_env(os.spawnvpe)
 
 
 # The introduction of this TestCase caused at least two different errors on
@@ -2098,11 +2457,13 @@ class TestSendfile(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.key = support.threading_setup()
         with open(support.TESTFN, "wb") as f:
             f.write(cls.DATA)
 
     @classmethod
     def tearDownClass(cls):
+        support.threading_cleanup(*cls.key)
         support.unlink(support.TESTFN)
 
     def setUp(self):
@@ -2122,6 +2483,7 @@ class TestSendfile(unittest.TestCase):
         self.client.close()
         if self.server.running:
             self.server.stop()
+        self.server = None
 
     def sendfile_wrapper(self, sock, file, offset, nbytes, headers=[], trailers=[]):
         """A higher level wrapper representing how an application is
@@ -2637,43 +2999,273 @@ class FDInheritanceTests(unittest.TestCase):
         self.assertEqual(os.get_inheritable(slave_fd), False)
 
 
-@support.reap_threads
-def test_main():
-    support.run_unittest(
-        FileTests,
-        StatAttributeTests,
-        UtimeTests,
-        EnvironTests,
-        WalkTests,
-        FwalkTests,
-        MakedirTests,
-        DevNullTests,
-        URandomTests,
-        URandomFDTests,
-        ExecTests,
-        Win32ErrorTests,
-        TestInvalidFD,
-        PosixUidGidTests,
-        Pep383Tests,
-        Win32KillTests,
-        Win32ListdirTests,
-        Win32SymlinkTests,
-        NonLocalSymlinkTests,
-        FSEncodingTests,
-        DeviceEncodingTests,
-        PidTests,
-        LoginTests,
-        LinkTests,
-        TestSendfile,
-        ProgramPriorityTests,
-        ExtendedAttributeTests,
-        Win32DeprecatedBytesAPI,
-        TermsizeTests,
-        OSErrorTests,
-        RemoveDirsTests,
-        CPUCountTests,
-        FDInheritanceTests,
-    )
+@unittest.skipUnless(hasattr(os, 'get_blocking'),
+                     'needs os.get_blocking() and os.set_blocking()')
+class BlockingTests(unittest.TestCase):
+    def test_blocking(self):
+        fd = os.open(__file__, os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        self.assertEqual(os.get_blocking(fd), True)
+
+        os.set_blocking(fd, False)
+        self.assertEqual(os.get_blocking(fd), False)
+
+        os.set_blocking(fd, True)
+        self.assertEqual(os.get_blocking(fd), True)
+
+
+
+class ExportsTests(unittest.TestCase):
+    def test_os_all(self):
+        self.assertIn('open', os.__all__)
+        self.assertIn('walk', os.__all__)
+
+
+class TestScandir(unittest.TestCase):
+    def setUp(self):
+        self.path = os.path.realpath(support.TESTFN)
+        self.addCleanup(support.rmtree, self.path)
+        os.mkdir(self.path)
+
+    def create_file(self, name="file.txt"):
+        filename = os.path.join(self.path, name)
+        with open(filename, "wb") as fp:
+            fp.write(b'python')
+        return filename
+
+    def get_entries(self, names):
+        entries = dict((entry.name, entry)
+                       for entry in os.scandir(self.path))
+        self.assertEqual(sorted(entries.keys()), names)
+        return entries
+
+    def assert_stat_equal(self, stat1, stat2, skip_fields):
+        if skip_fields:
+            for attr in dir(stat1):
+                if not attr.startswith("st_"):
+                    continue
+                if attr in ("st_dev", "st_ino", "st_nlink"):
+                    continue
+                self.assertEqual(getattr(stat1, attr),
+                                 getattr(stat2, attr),
+                                 (stat1, stat2, attr))
+        else:
+            self.assertEqual(stat1, stat2)
+
+    def check_entry(self, entry, name, is_dir, is_file, is_symlink):
+        self.assertEqual(entry.name, name)
+        self.assertEqual(entry.path, os.path.join(self.path, name))
+        self.assertEqual(entry.inode(),
+                         os.stat(entry.path, follow_symlinks=False).st_ino)
+
+        entry_stat = os.stat(entry.path)
+        self.assertEqual(entry.is_dir(),
+                         stat.S_ISDIR(entry_stat.st_mode))
+        self.assertEqual(entry.is_file(),
+                         stat.S_ISREG(entry_stat.st_mode))
+        self.assertEqual(entry.is_symlink(),
+                         os.path.islink(entry.path))
+
+        entry_lstat = os.stat(entry.path, follow_symlinks=False)
+        self.assertEqual(entry.is_dir(follow_symlinks=False),
+                         stat.S_ISDIR(entry_lstat.st_mode))
+        self.assertEqual(entry.is_file(follow_symlinks=False),
+                         stat.S_ISREG(entry_lstat.st_mode))
+
+        self.assert_stat_equal(entry.stat(),
+                               entry_stat,
+                               os.name == 'nt' and not is_symlink)
+        self.assert_stat_equal(entry.stat(follow_symlinks=False),
+                               entry_lstat,
+                               os.name == 'nt')
+
+    def test_attributes(self):
+        link = hasattr(os, 'link')
+        symlink = support.can_symlink()
+
+        dirname = os.path.join(self.path, "dir")
+        os.mkdir(dirname)
+        filename = self.create_file("file.txt")
+        if link:
+            os.link(filename, os.path.join(self.path, "link_file.txt"))
+        if symlink:
+            os.symlink(dirname, os.path.join(self.path, "symlink_dir"),
+                       target_is_directory=True)
+            os.symlink(filename, os.path.join(self.path, "symlink_file.txt"))
+
+        names = ['dir', 'file.txt']
+        if link:
+            names.append('link_file.txt')
+        if symlink:
+            names.extend(('symlink_dir', 'symlink_file.txt'))
+        entries = self.get_entries(names)
+
+        entry = entries['dir']
+        self.check_entry(entry, 'dir', True, False, False)
+
+        entry = entries['file.txt']
+        self.check_entry(entry, 'file.txt', False, True, False)
+
+        if link:
+            entry = entries['link_file.txt']
+            self.check_entry(entry, 'link_file.txt', False, True, False)
+
+        if symlink:
+            entry = entries['symlink_dir']
+            self.check_entry(entry, 'symlink_dir', True, False, True)
+
+            entry = entries['symlink_file.txt']
+            self.check_entry(entry, 'symlink_file.txt', False, True, True)
+
+    def get_entry(self, name):
+        entries = list(os.scandir(self.path))
+        self.assertEqual(len(entries), 1)
+
+        entry = entries[0]
+        self.assertEqual(entry.name, name)
+        return entry
+
+    def create_file_entry(self):
+        filename = self.create_file()
+        return self.get_entry(os.path.basename(filename))
+
+    def test_current_directory(self):
+        filename = self.create_file()
+        old_dir = os.getcwd()
+        try:
+            os.chdir(self.path)
+
+            # call scandir() without parameter: it must list the content
+            # of the current directory
+            entries = dict((entry.name, entry) for entry in os.scandir())
+            self.assertEqual(sorted(entries.keys()),
+                             [os.path.basename(filename)])
+        finally:
+            os.chdir(old_dir)
+
+    def test_repr(self):
+        entry = self.create_file_entry()
+        self.assertEqual(repr(entry), "<DirEntry 'file.txt'>")
+
+    def test_removed_dir(self):
+        path = os.path.join(self.path, 'dir')
+
+        os.mkdir(path)
+        entry = self.get_entry('dir')
+        os.rmdir(path)
+
+        # On POSIX, is_dir() result depends if scandir() filled d_type or not
+        if os.name == 'nt':
+            self.assertTrue(entry.is_dir())
+        self.assertFalse(entry.is_file())
+        self.assertFalse(entry.is_symlink())
+        if os.name == 'nt':
+            self.assertRaises(FileNotFoundError, entry.inode)
+            # don't fail
+            entry.stat()
+            entry.stat(follow_symlinks=False)
+        else:
+            self.assertGreater(entry.inode(), 0)
+            self.assertRaises(FileNotFoundError, entry.stat)
+            self.assertRaises(FileNotFoundError, entry.stat, follow_symlinks=False)
+
+    def test_removed_file(self):
+        entry = self.create_file_entry()
+        os.unlink(entry.path)
+
+        self.assertFalse(entry.is_dir())
+        # On POSIX, is_dir() result depends if scandir() filled d_type or not
+        if os.name == 'nt':
+            self.assertTrue(entry.is_file())
+        self.assertFalse(entry.is_symlink())
+        if os.name == 'nt':
+            self.assertRaises(FileNotFoundError, entry.inode)
+            # don't fail
+            entry.stat()
+            entry.stat(follow_symlinks=False)
+        else:
+            self.assertGreater(entry.inode(), 0)
+            self.assertRaises(FileNotFoundError, entry.stat)
+            self.assertRaises(FileNotFoundError, entry.stat, follow_symlinks=False)
+
+    def test_broken_symlink(self):
+        if not support.can_symlink():
+            return self.skipTest('cannot create symbolic link')
+
+        filename = self.create_file("file.txt")
+        os.symlink(filename,
+                   os.path.join(self.path, "symlink.txt"))
+        entries = self.get_entries(['file.txt', 'symlink.txt'])
+        entry = entries['symlink.txt']
+        os.unlink(filename)
+
+        self.assertGreater(entry.inode(), 0)
+        self.assertFalse(entry.is_dir())
+        self.assertFalse(entry.is_file())  # broken symlink returns False
+        self.assertFalse(entry.is_dir(follow_symlinks=False))
+        self.assertFalse(entry.is_file(follow_symlinks=False))
+        self.assertTrue(entry.is_symlink())
+        self.assertRaises(FileNotFoundError, entry.stat)
+        # don't fail
+        entry.stat(follow_symlinks=False)
+
+    def test_bytes(self):
+        if os.name == "nt":
+            # On Windows, os.scandir(bytes) must raise an exception
+            self.assertRaises(TypeError, os.scandir, b'.')
+            return
+
+        self.create_file("file.txt")
+
+        path_bytes = os.fsencode(self.path)
+        entries = list(os.scandir(path_bytes))
+        self.assertEqual(len(entries), 1, entries)
+        entry = entries[0]
+
+        self.assertEqual(entry.name, b'file.txt')
+        self.assertEqual(entry.path,
+                         os.fsencode(os.path.join(self.path, 'file.txt')))
+
+    def test_bytes_like(self):
+        if os.name == "nt":
+            # On Windows, os.scandir(bytes) must raise an exception
+            for cls in bytearray, memoryview:
+                self.assertRaises(TypeError, os.scandir, cls(b'.'))
+            return
+
+        # Deprecated in 3.6.
+        self.create_file("file.txt")
+
+        for cls in bytearray, memoryview:
+            path_bytes = cls(os.fsencode(self.path))
+            entries = list(os.scandir(path_bytes))
+            self.assertEqual(len(entries), 1, entries)
+            entry = entries[0]
+
+            self.assertEqual(entry.name, b'file.txt')
+            self.assertEqual(entry.path,
+                             os.fsencode(os.path.join(self.path, 'file.txt')))
+            self.assertIs(type(entry.name), bytes)
+            self.assertIs(type(entry.path), bytes)
+
+    def test_empty_path(self):
+        self.assertRaises(FileNotFoundError, os.scandir, '')
+
+    def test_consume_iterator_twice(self):
+        self.create_file("file.txt")
+        iterator = os.scandir(self.path)
+
+        entries = list(iterator)
+        self.assertEqual(len(entries), 1, entries)
+
+        # check than consuming the iterator twice doesn't raise exception
+        entries2 = list(iterator)
+        self.assertEqual(len(entries2), 0, entries2)
+
+    def test_bad_path_type(self):
+        for obj in [1234, 1.234, {}, []]:
+            self.assertRaises(TypeError, os.scandir, obj)
+
 
 if __name__ == "__main__":
-    test_main()
+    unittest.main()

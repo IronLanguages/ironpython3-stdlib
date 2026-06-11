@@ -71,6 +71,7 @@ class POP3:
             UIDL [msg]              uidl(msg = None)
             CAPA                    capa()
             STLS                    stls()
+            UTF8                    utf8()
 
     Raises one exception: 'error_proto'.
 
@@ -287,9 +288,12 @@ class POP3:
             if sock is not None:
                 try:
                     sock.shutdown(socket.SHUT_RDWR)
-                except OSError as e:
-                    # The server might already have closed the connection
-                    if e.errno != errno.ENOTCONN:
+                except OSError as exc:
+                    # The server might already have closed the connection.
+                    # On Windows, this may result in WSAEINVAL (error 10022):
+                    # An invalid operation was attempted.
+                    if (exc.errno != errno.ENOTCONN
+                       and getattr(exc, 'winerror', 0) != 10022):
                         raise
                 finally:
                     sock.close()
@@ -346,6 +350,12 @@ class POP3:
         if which is not None:
             return self._shortcmd('UIDL %s' % which)
         return self._longcmd('UIDL')
+
+
+    def utf8(self):
+        """Try to enter UTF-8 mode (see RFC 6856). Returns server response.
+        """
+        return self._shortcmd('UTF8')
 
 
     def capa(self):

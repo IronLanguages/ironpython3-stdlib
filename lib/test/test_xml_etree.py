@@ -18,7 +18,7 @@ import weakref
 
 from itertools import product
 from test import support
-from test.support import TESTFN, findfile, import_fresh_module, gc_collect
+from test.support import TESTFN, findfile, import_fresh_module, gc_collect, swap_attr
 
 # pyET is the pure-Python implementation.
 #
@@ -405,6 +405,14 @@ class ElementTreeTest(unittest.TestCase):
         self.assertEqual(ET.tostring(elem),
                 b'<test testa="testval" testb="test1" testc="test2">aa</test>')
 
+        elem = ET.Element('test')
+        elem.set('a', '\r')
+        elem.set('b', '\r\n')
+        elem.set('c', '\t\n\r ')
+        elem.set('d', '\n\n')
+        self.assertEqual(ET.tostring(elem),
+                b'<test a="&#10;" b="&#10;" c="&#09;&#10;&#10; " d="&#10;&#10;" />')
+
     def test_makeelement(self):
         # Test makeelement handling.
 
@@ -567,14 +575,11 @@ class ElementTreeTest(unittest.TestCase):
             self.assertFalse(f.closed)
         self.assertEqual(str(cm.exception), "unknown event 'bogus'")
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.filterwarnings("always", category=ResourceWarning)
+        with support.check_no_resource_warning(self):
             with self.assertRaises(ValueError) as cm:
                 iterparse(SIMPLE_XMLFILE, events)
             self.assertEqual(str(cm.exception), "unknown event 'bogus'")
             del cm
-            support.gc_collect()
-        self.assertEqual(w, [])
 
         source = io.BytesIO(
             b"<?xml version='1.0' encoding='iso-8859-1'?>\n"
@@ -601,15 +606,12 @@ class ElementTreeTest(unittest.TestCase):
         it = iterparse(TESTFN)
         action, elem = next(it)
         self.assertEqual((action, elem.tag), ('end', 'document'))
-        with warnings.catch_warnings(record=True) as w:
-            warnings.filterwarnings("always", category=ResourceWarning)
+        with support.check_no_resource_warning(self):
             with self.assertRaises(ET.ParseError) as cm:
                 next(it)
             self.assertEqual(str(cm.exception),
                     'junk after document element: line 1, column 12')
             del cm, it
-            support.gc_collect()
-        self.assertEqual(w, [])
 
     def test_writefile(self):
         elem = ET.Element("tag")
@@ -758,7 +760,7 @@ class ElementTreeTest(unittest.TestCase):
             'mac-roman', 'mac-turkish',
             'iso2022-jp', 'iso2022-jp-1', 'iso2022-jp-2', 'iso2022-jp-2004',
             'iso2022-jp-3', 'iso2022-jp-ext',
-            'koi8-r', 'koi8-u',
+            'koi8-r', 'koi8-t', 'koi8-u', 'kz1048',
             'hz', 'ptcp154',
         ]
         for encoding in supported_encodings:
@@ -1666,6 +1668,57 @@ class BugsTest(unittest.TestCase):
         ET.register_namespace('test10777', 'http://myuri/')
         ET.register_namespace('test10777', 'http://myuri/')
 
+    def test_lost_text(self):
+        # Issue #25902: Borrowed text can disappear
+        class Text:
+            def __bool__(self):
+                e.text = 'changed'
+                return True
+
+        e = ET.Element('tag')
+        e.text = Text()
+        i = e.itertext()
+        t = next(i)
+        self.assertIsInstance(t, Text)
+        self.assertIsInstance(e.text, str)
+        self.assertEqual(e.text, 'changed')
+
+    def test_lost_tail(self):
+        # Issue #25902: Borrowed tail can disappear
+        class Text:
+            def __bool__(self):
+                e[0].tail = 'changed'
+                return True
+
+        e = ET.Element('root')
+        e.append(ET.Element('tag'))
+        e[0].tail = Text()
+        i = e.itertext()
+        t = next(i)
+        self.assertIsInstance(t, Text)
+        self.assertIsInstance(e[0].tail, str)
+        self.assertEqual(e[0].tail, 'changed')
+
+    def test_lost_elem(self):
+        # Issue #25902: Borrowed element can disappear
+        class Tag:
+            def __eq__(self, other):
+                e[0] = ET.Element('changed')
+                next(i)
+                return True
+
+        e = ET.Element('root')
+        e.append(ET.Element(Tag()))
+        e.append(ET.Element('tag'))
+        i = e.iter('tag')
+        try:
+            t = next(i)
+        except ValueError:
+            self.skipTest('generators are not reentrant')
+        self.assertIsInstance(t.tag, Tag)
+        self.assertIsInstance(e[0].tag, str)
+        self.assertEqual(e[0].tag, 'changed')
+
 
 # --------------------------------------------------------------------
 
@@ -1814,6 +1867,124 @@ class BadElementTest(ElementTestCase, unittest.TestCase):
         e = ET.Element('foo')
         e.extend([ET.Element('bar')])
         self.assertRaises(ValueError, e.remove, X('baz'))
+
+    def test_recursive_repr(self):
+        # Issue #25455
+        e = ET.Element('foo')
+        with swap_attr(e, 'tag', e):
+            with self.assertRaises(RuntimeError):
+                repr(e)  # Should not crash
+
+    def test_element_get_text(self):
+        # Issue #27863
+        class X(str):
+            def __del__(self):
+                try:
+                    elem.text
+                except NameError:
+                    pass
+
+        b = ET.TreeBuilder()
+        b.start('tag', {})
+        b.data('ABCD')
+        b.data(X('EFGH'))
+        b.data('IJKL')
+        b.end('tag')
+
+        elem = b.close()
+        self.assertEqual(elem.text, 'ABCDEFGHIJKL')
+
+    def test_element_get_tail(self):
+        # Issue #27863
+        class X(str):
+            def __del__(self):
+                try:
+                    elem[0].tail
+                except NameError:
+                    pass
+
+        b = ET.TreeBuilder()
+        b.start('root', {})
+        b.start('tag', {})
+        b.end('tag')
+        b.data('ABCD')
+        b.data(X('EFGH'))
+        b.data('IJKL')
+        b.end('root')
+
+        elem = b.close()
+        self.assertEqual(elem[0].tail, 'ABCDEFGHIJKL')
+
+    def test_element_iter(self):
+        # Issue #27863
+        state = {
+            'tag': 'tag',
+            '_children': [None],  # non-Element
+            'attrib': 'attr',
+            'tail': 'tail',
+            'text': 'text',
+        }
+
+        e = ET.Element('tag')
+        try:
+            e.__setstate__(state)
+        except AttributeError:
+            e.__dict__ = state
+
+        it = e.iter()
+        self.assertIs(next(it), e)
+        self.assertRaises(AttributeError, next, it)
+
+    def test_subscr(self):
+        # Issue #27863
+        class X:
+            def __index__(self):
+                del e[:]
+                return 1
+
+        e = ET.Element('elem')
+        e.append(ET.Element('child'))
+        e[:X()]  # shouldn't crash
+
+        e.append(ET.Element('child'))
+        e[0:10:X()]  # shouldn't crash
+
+    def test_ass_subscr(self):
+        # Issue #27863
+        class X:
+            def __index__(self):
+                e[:] = []
+                return 1
+
+        e = ET.Element('elem')
+        for _ in range(10):
+            e.insert(0, ET.Element('child'))
+
+        e[0:10:X()] = []  # shouldn't crash
+
+    def test_treebuilder_start(self):
+        # Issue #27863
+        def element_factory(x, y):
+            return []
+        b = ET.TreeBuilder(element_factory=element_factory)
+
+        b.start('tag', {})
+        b.data('ABCD')
+        self.assertRaises(AttributeError, b.start, 'tag2', {})
+        del b
+        gc_collect()
+
+    def test_treebuilder_end(self):
+        # Issue #27863
+        def element_factory(x, y):
+            return []
+        b = ET.TreeBuilder(element_factory=element_factory)
+
+        b.start('tag', {})
+        b.data('ABCD')
+        self.assertRaises(AttributeError, b.end, 'tag')
+        del b
+        gc_collect()
 
 
 class MutatingElementPath(str):
@@ -2132,8 +2303,40 @@ class ElementIterTest(unittest.TestCase):
         # make sure both tag=None and tag='*' return all tags
         all_tags = ['document', 'house', 'room', 'room',
                     'shed', 'house', 'room']
+        self.assertEqual(summarize_list(doc.iter()), all_tags)
         self.assertEqual(self._ilist(doc), all_tags)
         self.assertEqual(self._ilist(doc, '*'), all_tags)
+
+    def test_getiterator(self):
+        doc = ET.XML('''
+            <document>
+                <house>
+                    <room>bedroom1</room>
+                    <room>bedroom2</room>
+                </house>
+                <shed>nothing here
+                </shed>
+                <house>
+                    <room>bedroom8</room>
+                </house>
+            </document>''')
+
+        self.assertEqual(summarize_list(doc.getiterator('room')),
+                         ['room'] * 3)
+        self.assertEqual(summarize_list(doc.getiterator('house')),
+                         ['house'] * 2)
+
+        # test that getiterator also accepts 'tag' as a keyword arg
+        self.assertEqual(
+            summarize_list(doc.getiterator(tag='room')),
+            ['room'] * 3)
+
+        # make sure both tag=None and tag='*' return all tags
+        all_tags = ['document', 'house', 'room', 'room',
+                    'shed', 'house', 'room']
+        self.assertEqual(summarize_list(doc.getiterator()), all_tags)
+        self.assertEqual(summarize_list(doc.getiterator(None)), all_tags)
+        self.assertEqual(summarize_list(doc.getiterator('*')), all_tags)
 
     def test_copy(self):
         a = ET.Element('a')

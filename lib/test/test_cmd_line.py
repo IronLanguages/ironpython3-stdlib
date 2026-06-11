@@ -8,8 +8,8 @@ import shutil
 import sys
 import subprocess
 import tempfile
-from test import script_helper
-from test.script_helper import (spawn_python, kill_python, assert_python_ok,
+from test.support import script_helper
+from test.support.script_helper import (spawn_python, kill_python, assert_python_ok,
     assert_python_failure)
 
 
@@ -59,7 +59,7 @@ class CmdLineTest(unittest.TestCase):
 
     def test_xoptions(self):
         def get_xoptions(*args):
-            # use subprocess module directly because test.script_helper adds
+            # use subprocess module directly because test.support.script_helper adds
             # "-X faulthandler" to the command line
             args = (sys.executable, '-E') + args
             args += ('-c', 'import sys; print(sys._xoptions)')
@@ -344,7 +344,8 @@ class CmdLineTest(unittest.TestCase):
         # Issue #5319: if stdout.flush() fails at shutdown, an error should
         # be printed out.
         code = """if 1:
-            import os, sys
+            import os, sys, test.support
+            test.support.SuppressCrashReport().__enter__()
             sys.stdout.write('x')
             os.close(sys.stdout.fileno())"""
         rc, out, err = assert_python_ok('-c', code)
@@ -456,7 +457,7 @@ class CmdLineTest(unittest.TestCase):
         self.assertEqual(err.splitlines().count(b'Unknown option: -a'), 1)
         self.assertEqual(b'', out)
 
-    @unittest.skipIf(script_helper._interpreter_requires_environment(),
+    @unittest.skipIf(script_helper.interpreter_requires_environment(),
                      'Cannot run -I tests when PYTHON env vars are required.')
     def test_isolatedmode(self):
         self.verify_valid_flag('-I')
@@ -464,7 +465,7 @@ class CmdLineTest(unittest.TestCase):
         rc, out, err = assert_python_ok('-I', '-c',
             'from sys import flags as f; '
             'print(f.no_user_site, f.ignore_environment, f.isolated)',
-            # dummyvar to prevent extranous -E
+            # dummyvar to prevent extraneous -E
             dummyvar="")
         self.assertEqual(out.strip(), b'1 1 1')
         with test.support.temp_cwd() as tmpdir:

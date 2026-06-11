@@ -365,10 +365,7 @@ class Connection(_ConnectionBase):
     def _send(self, buf, write=_write):
         remaining = len(buf)
         while True:
-            try:
-                n = write(self._handle, buf)
-            except InterruptedError:
-                continue
+            n = write(self._handle, buf)
             remaining -= n
             if remaining == 0:
                 break
@@ -379,10 +376,7 @@ class Connection(_ConnectionBase):
         handle = self._handle
         remaining = size
         while remaining > 0:
-            try:
-                chunk = read(handle, remaining)
-            except InterruptedError:
-                continue
+            chunk = read(handle, remaining)
             n = len(chunk)
             if n == 0:
                 if remaining == size:
@@ -400,17 +394,14 @@ class Connection(_ConnectionBase):
         if n > 16384:
             # The payload is large so Nagle's algorithm won't be triggered
             # and we'd better avoid the cost of concatenation.
-            chunks = [header, buf]
-        elif n > 0:
-            # Issue # 20540: concatenate before sending, to avoid delays due
-            # to Nagle's algorithm on a TCP socket.
-            chunks = [header + buf]
+            self._send(header)
+            self._send(buf)
         else:
-            # This code path is necessary to avoid "broken pipe" errors
-            # when sending a 0-length buffer if the other end closed the pipe.
-            chunks = [header]
-        for chunk in chunks:
-            self._send(chunk)
+            # Issue #20540: concatenate before sending, to avoid delays due
+            # to Nagle's algorithm on a TCP socket.
+            # Also note we want to avoid sending a 0-length buffer separately,
+            # to avoid "broken pipe" errors if the other end closed the pipe.
+            self._send(header + buf)
 
     def _recv_bytes(self, maxsize=None):
         buf = self._recv(4)
@@ -599,13 +590,7 @@ class SocketListener(object):
             self._unlink = None
 
     def accept(self):
-        while True:
-            try:
-                s, self._last_accepted = self._socket.accept()
-            except InterruptedError:
-                pass
-            else:
-                break
+        s, self._last_accepted = self._socket.accept()
         s.setblocking(True)
         return Connection(s.detach())
 

@@ -1,6 +1,5 @@
 # Augmented assignment test.
 
-from test.support import run_unittest
 import unittest
 
 
@@ -136,6 +135,14 @@ class AugAssignTest(unittest.TestCase):
                 output.append("__imul__ called")
                 return self
 
+            def __matmul__(self, val):
+                output.append("__matmul__ called")
+            def __rmatmul__(self, val):
+                output.append("__rmatmul__ called")
+            def __imatmul__(self, val):
+                output.append("__imatmul__ called")
+                return self
+
             def __floordiv__(self, val):
                 output.append("__floordiv__ called")
                 return self
@@ -225,6 +232,10 @@ class AugAssignTest(unittest.TestCase):
         1 * x
         x *= 1
 
+        x @ 1
+        1 @ x
+        x @= 1
+
         x / 1
         1 / x
         x /= 1
@@ -271,6 +282,9 @@ __isub__ called
 __mul__ called
 __rmul__ called
 __imul__ called
+__matmul__ called
+__rmatmul__ called
+__imatmul__ called
 __truediv__ called
 __rtruediv__ called
 __itruediv__ called
@@ -300,8 +314,5 @@ __rlshift__ called
 __ilshift__ called
 '''.splitlines())
 
-def test_main():
-    run_unittest(AugAssignTest)
-
 if __name__ == '__main__':
-    test_main()
+    unittest.main()

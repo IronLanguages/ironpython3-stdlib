@@ -1,4 +1,4 @@
-from test.support import run_unittest, check_warnings
+from test.support import check_warnings
 import cgi
 import os
 import sys
@@ -344,6 +344,16 @@ Larry
         self.assertEqual(fs.list[0].name, 'submit-name')
         self.assertEqual(fs.list[0].value, 'Larry')
 
+    def test_fieldstorage_as_context_manager(self):
+        fp = BytesIO(b'x' * 10)
+        env = {'REQUEST_METHOD': 'PUT'}
+        with cgi.FieldStorage(fp=fp, environ=env) as fs:
+            content = fs.file.read()
+            self.assertFalse(fs.file.closed)
+        self.assertTrue(fs.file.closed)
+        self.assertEqual(content, 'x' * 10)
+        with self.assertRaisesRegex(ValueError, 'I/O operation on closed file'):
+            fs.file.read()
 
     _qs_result = {
         'key1': 'value1',
@@ -519,9 +529,5 @@ Content-Transfer-Encoding: binary
 --AaB03x--
 """
 
-
-def test_main():
-    run_unittest(CgiTests)
-
 if __name__ == '__main__':
-    test_main()
+    unittest.main()

@@ -1,4 +1,5 @@
 import unittest
+import unittest.mock
 import builtins
 import rlcompleter
 
@@ -77,6 +78,7 @@ class TestRlcompleter(unittest.TestCase):
         self.assertEqual(completer.complete('f.b', 0), 'f.bar')
         self.assertEqual(f.calls, 1)
 
+    @unittest.mock.patch('rlcompleter._readline_available', False)
     def test_complete(self):
         completer = rlcompleter.Completer()
         self.assertEqual(completer.complete('', 0), '\t')
@@ -105,7 +107,6 @@ class TestRlcompleter(unittest.TestCase):
         self.assertIsNone(completer.complete('memoryview', 1))
         self.assertEqual(completer.complete('Ellipsis', 0), 'Ellipsis(')
         self.assertIsNone(completer.complete('Ellipsis', 1))
-
 
 if __name__ == '__main__':
     unittest.main()
