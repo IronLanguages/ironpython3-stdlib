@@ -11,10 +11,11 @@ import tempfile
 import subprocess
 
 import urllib.request
-# The proxy bypass method imported below has logic specific to the OSX
-# proxy config data structure but is testable on all platforms.
+# The proxy bypass method imported below has logic specific to the
+# corresponding system but is testable on all platforms.
 from urllib.request import (Request, OpenerDirector, HTTPBasicAuthHandler,
                             HTTPPasswordMgrWithPriorAuth, _parse_proxy,
+                            _proxy_bypass_winreg_override,
                             _proxy_bypass_macosx_sysconf,
                             AbstractDigestAuthHandler)
 from urllib.parse import urlparse
@@ -57,10 +58,8 @@ class TrivialTests(unittest.TestCase):
         else:
             file_url = "file://%s" % fname
 
-        f = urllib.request.urlopen(file_url)
-
-        f.read()
-        f.close()
+        with urllib.request.urlopen(file_url) as f:
+            f.read()
 
     def test_parse_http_list(self):
         tests = [
@@ -1358,21 +1357,22 @@ class HandlerTests(unittest.TestCase):
                 self.assertTrue(request.startswith(expected), repr(request))
 
     def test_proxy(self):
-        o = OpenerDirector()
-        ph = urllib.request.ProxyHandler(dict(http="proxy.example.com:3128"))
-        o.add_handler(ph)
-        meth_spec = [
-            [("http_open", "return response")]
-            ]
-        handlers = add_ordered_mock_handlers(o, meth_spec)
+        u = "proxy.example.com:3128"
+        for d in dict(http=u), dict(HTTP=u):
+            o = OpenerDirector()
+            ph = urllib.request.ProxyHandler(d)
+            o.add_handler(ph)
+            meth_spec = [
+                [("http_open", "return response")]
+                ]
+            handlers = add_ordered_mock_handlers(o, meth_spec)
 
-        req = Request("http://acme.example.com/")
-        self.assertEqual(req.host, "acme.example.com")
-        o.open(req)
-        self.assertEqual(req.host, "proxy.example.com:3128")
-
-        self.assertEqual([(handlers[0], "http_open")],
-                         [tup[0:2] for tup in o.calls])
+            req = Request("http://acme.example.com/")
+            self.assertEqual(req.host, "acme.example.com")
+            o.open(req)
+            self.assertEqual(req.host, u)
+            self.assertEqual([(handlers[0], "http_open")],
+                             [tup[0:2] for tup in o.calls])
 
     def test_proxy_no_proxy(self):
         os.environ['no_proxy'] = 'python.org'
@@ -1439,6 +1439,30 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(req.host, "proxy.example.com:3128")
         self.assertEqual(req.get_header("Proxy-authorization"), "FooBar")
 
+    @unittest.skipUnless(os.name == "nt", "only relevant for Windows")
+    def test_winreg_proxy_bypass(self):
+        proxy_override = "www.example.com;*.example.net; 192.168.0.1"
+        proxy_bypass = _proxy_bypass_winreg_override
+        for host in ("www.example.com", "www.example.net", "192.168.0.1"):
+            self.assertTrue(proxy_bypass(host, proxy_override),
+                            "expected bypass of %s to be true" % host)
+
+        for host in ("example.com", "www.example.org", "example.net",
+                     "192.168.0.2"):
+            self.assertFalse(proxy_bypass(host, proxy_override),
+                             "expected bypass of %s to be False" % host)
+
+        # check intranet address bypass
+        proxy_override = "example.com; <local>"
+        self.assertTrue(proxy_bypass("example.com", proxy_override),
+                        "expected bypass of %s to be true" % host)
+        self.assertFalse(proxy_bypass("example.net", proxy_override),
+                         "expected bypass of %s to be False" % host)
+        for host in ("test", "localhost"):
+            self.assertTrue(proxy_bypass(host, proxy_override),
+                            "expect <local> to bypass intranet address '%s'"
+                            % host)
+
     @unittest.skipUnless(sys.platform == 'darwin', "only relevant for OSX")
     def test_osx_proxy_bypass(self):
         bypass = {
@@ -1460,6 +1484,18 @@ class HandlerTests(unittest.TestCase):
         # Check the exclude_simple flag
         bypass = {'exclude_simple': True, 'exceptions': []}
         self.assertTrue(_proxy_bypass_macosx_sysconf('test', bypass))
+
+        # Check that invalid prefix lengths are ignored
+        bypass = {
+            'exclude_simple': False,
+            'exceptions': [ '10.0.0.0/40', '172.19.10.0/24' ]
+        }
+        host = '172.19.10.5'
+        self.assertTrue(_proxy_bypass_macosx_sysconf(host, bypass),
+                        'expected bypass of %s to be True' % host)
+        host = '10.0.1.5'
+        self.assertFalse(_proxy_bypass_macosx_sysconf(host, bypass),
+                        'expected bypass of %s to be False' % host)
 
     def check_basic_auth(self, headers, realm):
         with self.subTest(realm=realm, headers=headers):
@@ -1791,6 +1827,8 @@ class MiscTests(unittest.TestCase):
 
     @unittest.skipUnless(support.is_resource_enabled('network'),
                          'test requires network access')
+    # bpo-46648: test fails randomly with "http://www.example.com/" URL
+    @unittest.skipIf(True, "POST request to http://www.example.com/ fail randomly")
     def test_issue16464(self):
         with support.transient_internet("http://www.example.com/"):
             opener = urllib.request.build_opener()
@@ -1852,8 +1890,16 @@ class MiscTests(unittest.TestCase):
              ('ftp', 'joe', 'password', 'proxy.example.com')),
             # Test for no trailing '/' case
             ('http://joe:password@proxy.example.com',
-             ('http', 'joe', 'password', 'proxy.example.com'))
+             ('http', 'joe', 'password', 'proxy.example.com')),
+            # Testcases with '/' character in username, password
+            ('http://user/name:password@localhost:22',
+             ('http', 'user/name', 'password', 'localhost:22')),
+            ('http://username:pass/word@localhost:22',
+             ('http', 'username', 'pass/word', 'localhost:22')),
+            ('http://user/name:pass/word@localhost:22',
+             ('http', 'user/name', 'pass/word', 'localhost:22')),
         ]
+
 
         for tc, expected in parse_proxy_test_cases:
             self.assertEqual(_parse_proxy(tc), expected)

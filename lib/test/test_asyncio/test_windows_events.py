@@ -1,6 +1,9 @@
 import os
+import signal
 import socket
 import sys
+import time
+import threading
 import unittest
 from unittest import mock
 
@@ -13,6 +16,10 @@ import _winapi
 import asyncio
 from asyncio import windows_events
 from test.test_asyncio import utils as test_utils
+
+
+def tearDownModule():
+    asyncio.set_event_loop_policy(None)
 
 
 class UpperProto(asyncio.Protocol):
@@ -29,7 +36,66 @@ class UpperProto(asyncio.Protocol):
             self.trans.close()
 
 
-class ProactorTests(test_utils.TestCase):
+class WindowsEventsTestCase(test_utils.TestCase):
+    def _unraisablehook(self, unraisable):
+        # Storing unraisable.object can resurrect an object which is being
+        # finalized. Storing unraisable.exc_value creates a reference cycle.
+        self._unraisable = unraisable
+        print(unraisable)
+
+    def setUp(self):
+        self._prev_unraisablehook = sys.unraisablehook
+        self._unraisable = None
+        sys.unraisablehook = self._unraisablehook
+
+    def tearDown(self):
+        sys.unraisablehook = self._prev_unraisablehook
+        self.assertIsNone(self._unraisable)
+
+class ProactorLoopCtrlC(WindowsEventsTestCase):
+
+    def test_ctrl_c(self):
+
+        def SIGINT_after_delay():
+            time.sleep(0.1)
+            signal.raise_signal(signal.SIGINT)
+
+        thread = threading.Thread(target=SIGINT_after_delay)
+        loop = asyncio.get_event_loop()
+        try:
+            # only start the loop once the event loop is running
+            loop.call_soon(thread.start)
+            loop.run_forever()
+            self.fail("should not fall through 'run_forever'")
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.close_loop(loop)
+        thread.join()
+
+
+class ProactorMultithreading(WindowsEventsTestCase):
+    def test_run_from_nonmain_thread(self):
+        finished = False
+
+        async def coro():
+            await asyncio.sleep(0)
+
+        def func():
+            nonlocal finished
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(coro())
+            # close() must not call signal.set_wakeup_fd()
+            loop.close()
+            finished = True
+
+        thread = threading.Thread(target=func)
+        thread.start()
+        thread.join()
+        self.assertTrue(finished)
+
+
+class ProactorTests(WindowsEventsTestCase):
 
     def setUp(self):
         super().setUp()
@@ -161,8 +227,60 @@ class ProactorTests(test_utils.TestCase):
         fut.cancel()
         fut.cancel()
 
+    def test_read_self_pipe_restart(self):
+        # Regression test for https://bugs.python.org/issue39010
+        # Previously, restarting a proactor event loop in certain states
+        # would lead to spurious ConnectionResetErrors being logged.
+        self.loop.call_exception_handler = mock.Mock()
+        # Start an operation in another thread so that the self-pipe is used.
+        # This is theoretically timing-dependent (the task in the executor
+        # must complete before our start/stop cycles), but in practice it
+        # seems to work every time.
+        f = self.loop.run_in_executor(None, lambda: None)
+        self.loop.stop()
+        self.loop.run_forever()
+        self.loop.stop()
+        self.loop.run_forever()
 
-class WinPolicyTests(test_utils.TestCase):
+        # Shut everything down cleanly. This is an important part of the
+        # test - in issue 39010, the error occurred during loop.close(),
+        # so we want to close the loop during the test instead of leaving
+        # it for tearDown.
+        #
+        # First wait for f to complete to avoid a "future's result was never
+        # retrieved" error.
+        self.loop.run_until_complete(f)
+        # Now shut down the loop itself (self.close_loop also shuts down the
+        # loop's default executor).
+        self.close_loop(self.loop)
+        self.assertFalse(self.loop.call_exception_handler.called)
+
+    def test_loop_restart(self):
+        # We're fishing for the "RuntimeError: <_overlapped.Overlapped object at XXX>
+        # still has pending operation at deallocation, the process may crash" error
+        stop = threading.Event()
+        def threadMain():
+            while not stop.is_set():
+                self.loop.call_soon_threadsafe(lambda: None)
+                time.sleep(0.01)
+        thr = threading.Thread(target=threadMain)
+
+        # In 10 60-second runs of this test prior to the fix:
+        # time in seconds until failure: (none), 15.0, 6.4, (none), 7.6, 8.3, 1.7, 22.2, 23.5, 8.3
+        # 10 seconds had a 50% failure rate but longer would be more costly
+        end_time = time.time() + 10 # Run for 10 seconds
+        self.loop.call_soon(thr.start)
+        while not self._unraisable: # Stop if we got an unraisable exc
+            self.loop.stop()
+            self.loop.run_forever()
+            if time.time() >= end_time:
+                break
+
+        stop.set()
+        thr.join()
+
+
+class WinPolicyTests(WindowsEventsTestCase):
 
     def test_selector_win_policy(self):
         async def main():

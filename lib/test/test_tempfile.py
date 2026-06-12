@@ -9,19 +9,15 @@ import sys
 import re
 import warnings
 import contextlib
+import stat
 import weakref
+import subprocess
 from unittest import mock
 
 import unittest
 from test import support
 from test.support import script_helper
 
-
-if hasattr(os, 'stat'):
-    import stat
-    has_stat = 1
-else:
-    has_stat = 0
 
 has_textmode = (tempfile._text_openflags != tempfile._bin_openflags)
 has_spawnl = hasattr(os, 'spawnl')
@@ -443,7 +439,6 @@ class TestMkstempInner(TestBadTempdir, BaseTestCase):
         finally:
             os.rmdir(dir)
 
-    @unittest.skipUnless(has_stat, 'os.stat not available')
     def test_file_mode(self):
         # _mkstemp_inner creates files with the proper mode
 
@@ -589,9 +584,8 @@ class TestGetTempDir(BaseTestCase):
         # sneaky: just instantiate a NamedTemporaryFile, which
         # defaults to writing into the directory returned by
         # gettempdir.
-        file = tempfile.NamedTemporaryFile()
-        file.write(b"blat")
-        file.close()
+        with tempfile.NamedTemporaryFile() as file:
+            file.write(b"blat")
 
     def test_same_thing(self):
         # gettempdir always returns the same object
@@ -750,7 +744,6 @@ class TestMkdtemp(TestBadTempdir, BaseTestCase):
         finally:
             os.rmdir(dir)
 
-    @unittest.skipUnless(has_stat, 'os.stat not available')
     def test_mode(self):
         # mkdtemp creates directories with the proper mode
 
@@ -767,6 +760,33 @@ class TestMkdtemp(TestBadTempdir, BaseTestCase):
             self.assertEqual(mode, expected)
         finally:
             os.rmdir(dir)
+
+    @unittest.skipUnless(os.name == "nt", "Only on Windows.")
+    def test_mode_win32(self):
+        # Use icacls.exe to extract the users with some level of access
+        # Main thing we are testing is that the BUILTIN\Users group has
+        # no access. The exact ACL is going to vary based on which user
+        # is running the test.
+        dir = self.do_create()
+        try:
+            out = subprocess.check_output(["icacls.exe", dir], encoding="oem").casefold()
+        finally:
+            os.rmdir(dir)
+
+        dir = dir.casefold()
+        users = set()
+        found_user = False
+        for line in out.strip().splitlines():
+            acl = None
+            # First line of result includes our directory
+            if line.startswith(dir):
+                acl = line[len(dir):].strip()
+            elif line and line[:1].isspace():
+                acl = line.strip()
+            if acl:
+                users.add(acl.partition(":")[0])
+
+        self.assertNotIn(r"BUILTIN\Users".casefold(), users)
 
     def test_collision_with_existing_file(self):
         # mkdtemp tries another name when a file with
@@ -910,9 +930,8 @@ class TestNamedTemporaryFile(BaseTestCase):
         # A NamedTemporaryFile is deleted when closed
         dir = tempfile.mkdtemp()
         try:
-            f = tempfile.NamedTemporaryFile(dir=dir)
-            f.write(b'blat')
-            f.close()
+            with tempfile.NamedTemporaryFile(dir=dir) as f:
+                f.write(b'blat')
             self.assertFalse(os.path.exists(f.name),
                         "NamedTemporaryFile %s exists after close" % f.name)
         finally:
@@ -1108,6 +1127,8 @@ class TestSpooledTemporaryFile(BaseTestCase):
             f.newlines
         with self.assertRaises(AttributeError):
             f.encoding
+        with self.assertRaises(AttributeError):
+            f.errors
 
         f.write(b'x')
         self.assertTrue(f._rolled)
@@ -1117,6 +1138,8 @@ class TestSpooledTemporaryFile(BaseTestCase):
             f.newlines
         with self.assertRaises(AttributeError):
             f.encoding
+        with self.assertRaises(AttributeError):
+            f.errors
 
     def test_text_mode(self):
         # Creating a SpooledTemporaryFile with a text mode should produce
@@ -1134,6 +1157,7 @@ class TestSpooledTemporaryFile(BaseTestCase):
         self.assertIsNone(f.name)
         self.assertEqual(f.newlines, os.linesep)
         self.assertEqual(f.encoding, "utf-8")
+        self.assertEqual(f.errors, "strict")
 
         f.write("xyzzy\n")
         f.seek(0)
@@ -1147,10 +1171,12 @@ class TestSpooledTemporaryFile(BaseTestCase):
         self.assertIsNotNone(f.name)
         self.assertEqual(f.newlines, os.linesep)
         self.assertEqual(f.encoding, "utf-8")
+        self.assertEqual(f.errors, "strict")
 
     def test_text_newline_and_encoding(self):
         f = tempfile.SpooledTemporaryFile(mode='w+', max_size=10,
-                                          newline='', encoding='utf-8')
+                                          newline='', encoding='utf-8',
+                                          errors='ignore')
         f.write("\u039B\r\n")
         f.seek(0)
         self.assertEqual(f.read(), "\u039B\r\n")
@@ -1159,6 +1185,7 @@ class TestSpooledTemporaryFile(BaseTestCase):
         self.assertIsNone(f.name)
         self.assertIsNotNone(f.newlines)
         self.assertEqual(f.encoding, "utf-8")
+        self.assertEqual(f.errors, "ignore")
 
         f.write("\u039C" * 10 + "\r\n")
         f.write("\u039D" * 20)
@@ -1170,6 +1197,7 @@ class TestSpooledTemporaryFile(BaseTestCase):
         self.assertIsNotNone(f.name)
         self.assertIsNotNone(f.newlines)
         self.assertEqual(f.encoding, 'utf-8')
+        self.assertEqual(f.errors, 'ignore')
 
     def test_context_manager_before_rollover(self):
         # A SpooledTemporaryFile can be used as a context manager
@@ -1229,8 +1257,7 @@ class TestSpooledTemporaryFile(BaseTestCase):
         f.write(b'abcdefg\n')
         f.truncate(20)
         self.assertTrue(f._rolled)
-        if has_stat:
-            self.assertEqual(os.fstat(f.fileno()).st_size, 20)
+        self.assertEqual(os.fstat(f.fileno()).st_size, 20)
 
 
 if tempfile.NamedTemporaryFile is not tempfile.TemporaryFile:
@@ -1315,18 +1342,24 @@ class NulledModules:
 class TestTemporaryDirectory(BaseTestCase):
     """Test TemporaryDirectory()."""
 
-    def do_create(self, dir=None, pre="", suf="", recurse=1):
+    def do_create(self, dir=None, pre="", suf="", recurse=1, dirs=1, files=1):
         if dir is None:
             dir = tempfile.gettempdir()
         tmp = tempfile.TemporaryDirectory(dir=dir, prefix=pre, suffix=suf)
         self.nameCheck(tmp.name, dir, pre, suf)
-        # Create a subdirectory and some files
-        if recurse:
-            d1 = self.do_create(tmp.name, pre, suf, recurse-1)
-            d1.name = None
-        with open(os.path.join(tmp.name, "test.txt"), "wb") as f:
-            f.write(b"Hello world!")
+        self.do_create2(tmp.name, recurse, dirs, files)
         return tmp
+
+    def do_create2(self, path, recurse=1, dirs=1, files=1):
+        # Create subdirectories and some files
+        if recurse:
+            for i in range(dirs):
+                name = os.path.join(path, "dir%d" % i)
+                os.mkdir(name)
+                self.do_create2(name, recurse-1, dirs, files)
+        for i in range(files):
+            with open(os.path.join(path, "test%d.txt" % i), "wb") as f:
+                f.write(b"Hello world!")
 
     def test_mkdtemp_failure(self):
         # Check no additional exception if mkdtemp fails
@@ -1367,10 +1400,107 @@ class TestTemporaryDirectory(BaseTestCase):
                          "TemporaryDirectory %s exists after cleanup" % d1.name)
         self.assertTrue(os.path.exists(d2.name),
                         "Directory pointed to by a symlink was deleted")
-        self.assertEqual(os.listdir(d2.name), ['test.txt'],
+        self.assertEqual(os.listdir(d2.name), ['test0.txt'],
                          "Contents of the directory pointed to by a symlink "
                          "were deleted")
         d2.cleanup()
+
+    @support.skip_unless_symlink
+    def test_cleanup_with_symlink_modes(self):
+        # cleanup() should not follow symlinks when fixing mode bits (#91133)
+        with self.do_create(recurse=0) as d2:
+            file1 = os.path.join(d2, 'file1')
+            open(file1, 'wb').close()
+            dir1 = os.path.join(d2, 'dir1')
+            os.mkdir(dir1)
+            for mode in range(8):
+                mode <<= 6
+                with self.subTest(mode=format(mode, '03o')):
+                    def test(target, target_is_directory):
+                        d1 = self.do_create(recurse=0)
+                        symlink = os.path.join(d1.name, 'symlink')
+                        os.symlink(target, symlink,
+                                target_is_directory=target_is_directory)
+                        try:
+                            os.chmod(symlink, mode, follow_symlinks=False)
+                        except NotImplementedError:
+                            pass
+                        try:
+                            os.chmod(symlink, mode)
+                        except FileNotFoundError:
+                            pass
+                        os.chmod(d1.name, mode)
+                        d1.cleanup()
+                        self.assertFalse(os.path.exists(d1.name))
+
+                    with self.subTest('nonexisting file'):
+                        test('nonexisting', target_is_directory=False)
+                    with self.subTest('nonexisting dir'):
+                        test('nonexisting', target_is_directory=True)
+
+                    with self.subTest('existing file'):
+                        os.chmod(file1, mode)
+                        old_mode = os.stat(file1).st_mode
+                        test(file1, target_is_directory=False)
+                        new_mode = os.stat(file1).st_mode
+                        self.assertEqual(new_mode, old_mode,
+                                         '%03o != %03o' % (new_mode, old_mode))
+
+                    with self.subTest('existing dir'):
+                        os.chmod(dir1, mode)
+                        old_mode = os.stat(dir1).st_mode
+                        test(dir1, target_is_directory=True)
+                        new_mode = os.stat(dir1).st_mode
+                        self.assertEqual(new_mode, old_mode,
+                                         '%03o != %03o' % (new_mode, old_mode))
+
+    @unittest.skipUnless(hasattr(os, 'chflags'), 'requires os.chflags')
+    @support.skip_unless_symlink
+    def test_cleanup_with_symlink_flags(self):
+        # cleanup() should not follow symlinks when fixing flags (#91133)
+        flags = stat.UF_IMMUTABLE | stat.UF_NOUNLINK
+        self.check_flags(flags)
+
+        with self.do_create(recurse=0) as d2:
+            file1 = os.path.join(d2, 'file1')
+            open(file1, 'wb').close()
+            dir1 = os.path.join(d2, 'dir1')
+            os.mkdir(dir1)
+            def test(target, target_is_directory):
+                d1 = self.do_create(recurse=0)
+                symlink = os.path.join(d1.name, 'symlink')
+                os.symlink(target, symlink,
+                           target_is_directory=target_is_directory)
+                try:
+                    os.chflags(symlink, flags, follow_symlinks=False)
+                except NotImplementedError:
+                    pass
+                try:
+                    os.chflags(symlink, flags)
+                except FileNotFoundError:
+                    pass
+                os.chflags(d1.name, flags)
+                d1.cleanup()
+                self.assertFalse(os.path.exists(d1.name))
+
+            with self.subTest('nonexisting file'):
+                test('nonexisting', target_is_directory=False)
+            with self.subTest('nonexisting dir'):
+                test('nonexisting', target_is_directory=True)
+
+            with self.subTest('existing file'):
+                os.chflags(file1, flags)
+                old_flags = os.stat(file1).st_flags
+                test(file1, target_is_directory=False)
+                new_flags = os.stat(file1).st_flags
+                self.assertEqual(new_flags, old_flags)
+
+            with self.subTest('existing dir'):
+                os.chflags(dir1, flags)
+                old_flags = os.stat(dir1).st_flags
+                test(dir1, target_is_directory=True)
+                new_flags = os.stat(dir1).st_flags
+                self.assertEqual(new_flags, old_flags)
 
     @support.cpython_only
     def test_del_on_collection(self):
@@ -1402,7 +1532,7 @@ class TestTemporaryDirectory(BaseTestCase):
 
                     tmp2 = os.path.join(tmp.name, 'test_dir')
                     os.mkdir(tmp2)
-                    with open(os.path.join(tmp2, "test.txt"), "w") as f:
+                    with open(os.path.join(tmp2, "test0.txt"), "w") as f:
                         f.write("Hello world!")
 
                     {mod}.tmp = tmp
@@ -1469,6 +1599,51 @@ class TestTemporaryDirectory(BaseTestCase):
             self.assertTrue(os.path.exists(name))
             self.assertEqual(name, d.name)
         self.assertFalse(os.path.exists(name))
+
+    def test_modes(self):
+        for mode in range(8):
+            mode <<= 6
+            with self.subTest(mode=format(mode, '03o')):
+                d = self.do_create(recurse=3, dirs=2, files=2)
+                with d:
+                    # Change files and directories mode recursively.
+                    for root, dirs, files in os.walk(d.name, topdown=False):
+                        for name in files:
+                            os.chmod(os.path.join(root, name), mode)
+                        os.chmod(root, mode)
+                    d.cleanup()
+                self.assertFalse(os.path.exists(d.name))
+
+    def check_flags(self, flags):
+        # skip the test if these flags are not supported (ex: FreeBSD 13)
+        filename = support.TESTFN
+        try:
+            open(filename, "w").close()
+            try:
+                os.chflags(filename, flags)
+            except OSError as exc:
+                # "OSError: [Errno 45] Operation not supported"
+                self.skipTest(f"chflags() doesn't support flags "
+                              f"{flags:#b}: {exc}")
+            else:
+                os.chflags(filename, 0)
+        finally:
+            support.unlink(filename)
+
+    @unittest.skipUnless(hasattr(os, 'chflags'), 'requires os.chflags')
+    def test_flags(self):
+        flags = stat.UF_IMMUTABLE | stat.UF_NOUNLINK
+        self.check_flags(flags)
+
+        d = self.do_create(recurse=3, dirs=2, files=2)
+        with d:
+            # Change files and directories flags recursively.
+            for root, dirs, files in os.walk(d.name, topdown=False):
+                for name in files:
+                    os.chflags(os.path.join(root, name), flags)
+                os.chflags(root, flags)
+            d.cleanup()
+        self.assertFalse(os.path.exists(d.name))
 
 
 if __name__ == "__main__":

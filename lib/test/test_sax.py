@@ -17,12 +17,12 @@ from xml.sax.handler import feature_namespaces, feature_external_ges
 from xml.sax.xmlreader import InputSource, AttributesImpl, AttributesNSImpl
 from io import BytesIO, StringIO
 import codecs
-import gc
 import os.path
+import pyexpat
 import shutil
 from urllib.error import URLError
 from test import support
-from test.support import findfile, run_unittest, TESTFN
+from test.support import findfile, run_unittest, FakePath, TESTFN
 
 TEST_XMLFILE = findfile("test.xml", subdir="xmltestdata")
 TEST_XMLFILE_OUT = findfile("test.xml.out", subdir="xmltestdata")
@@ -183,6 +183,10 @@ class ParseTest(unittest.TestCase):
             with self.assertRaises(SAXException):
                 self.check_parse(f)
 
+    def test_parse_path_object(self):
+        make_xml_file(self.data, 'utf-8', None)
+        self.check_parse(FakePath(TESTFN))
+
     def test_parse_InputSource(self):
         # accept data without declared but with explicitly specified encoding
         make_xml_file(self.data, 'iso-8859-1', None)
@@ -254,6 +258,34 @@ class MakeParserTest(unittest.TestCase):
         from xml.sax import make_parser
         p = make_parser()
 
+    def test_make_parser3(self):
+        # Testing that make_parser can handle different types of
+        # iterables.
+        make_parser(['module'])
+        make_parser(('module', ))
+        make_parser({'module'})
+        make_parser(frozenset({'module'}))
+        make_parser({'module': None})
+        make_parser(iter(['module']))
+
+    def test_make_parser4(self):
+        # Testing that make_parser can handle empty iterables.
+        make_parser([])
+        make_parser(tuple())
+        make_parser(set())
+        make_parser(frozenset())
+        make_parser({})
+        make_parser(iter([]))
+
+    def test_make_parser5(self):
+        # Testing that make_parser can handle iterables with more than
+        # one item.
+        make_parser(['module1', 'module2'])
+        make_parser(('module1', 'module2'))
+        make_parser({'module1', 'module2'})
+        make_parser(frozenset({'module1', 'module2'}))
+        make_parser({'module1': None, 'module2': None})
+        make_parser(iter(['module1', 'module2']))
 
 # ===========================================================================
 #
@@ -366,6 +398,13 @@ class PrepareInputSourceTest(unittest.TestCase):
     def test_string(self):
         # If the source is a string, use it as a system ID and open it.
         prep = prepare_input_source(self.file)
+        self.assertIsNone(prep.getCharacterStream())
+        self.checkContent(prep.getByteStream(),
+                          b"This was read from a file.")
+
+    def test_path_objects(self):
+        # If the source is a Path object, use it as a system ID and open it.
+        prep = prepare_input_source(FakePath(self.file))
         self.assertIsNone(prep.getCharacterStream())
         self.checkContent(prep.getByteStream(),
                           b"This was read from a file.")
@@ -1167,6 +1206,56 @@ class ExpatReaderTest(XmlTestBase):
         parser.close()
 
         self.assertEqual(result.getvalue(), start + b"<doc>text</doc>")
+
+    @unittest.skipIf(pyexpat.version_info < (2, 6, 0),
+                     f'Expat {pyexpat.version_info} does not '
+                     'support reparse deferral')
+    def test_flush_reparse_deferral_enabled(self):
+        result = BytesIO()
+        xmlgen = XMLGenerator(result)
+        parser = create_parser()
+        parser.setContentHandler(xmlgen)
+
+        for chunk in ("<doc", ">"):
+            parser.feed(chunk)
+
+        self.assertEqual(result.getvalue(), start)  # i.e. no elements started
+        self.assertTrue(parser._parser.GetReparseDeferralEnabled())
+
+        parser.flush()
+
+        self.assertTrue(parser._parser.GetReparseDeferralEnabled())
+        self.assertEqual(result.getvalue(), start + b"<doc>")
+
+        parser.feed("</doc>")
+        parser.close()
+
+        self.assertEqual(result.getvalue(), start + b"<doc></doc>")
+
+    def test_flush_reparse_deferral_disabled(self):
+        result = BytesIO()
+        xmlgen = XMLGenerator(result)
+        parser = create_parser()
+        parser.setContentHandler(xmlgen)
+
+        for chunk in ("<doc", ">"):
+            parser.feed(chunk)
+
+        if pyexpat.version_info >= (2, 6, 0):
+            parser._parser.SetReparseDeferralEnabled(False)
+            self.assertEqual(result.getvalue(), start)  # i.e. no elements started
+
+        self.assertFalse(parser._parser.GetReparseDeferralEnabled())
+
+        parser.flush()
+
+        self.assertFalse(parser._parser.GetReparseDeferralEnabled())
+        self.assertEqual(result.getvalue(), start + b"<doc>")
+
+        parser.feed("</doc>")
+        parser.close()
+
+        self.assertEqual(result.getvalue(), start + b"<doc></doc>")
 
     # ===== Locator support
 
