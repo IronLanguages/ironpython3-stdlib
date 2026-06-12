@@ -39,6 +39,11 @@ def _interpreter_requires_environment():
     """
     global __cached_interp_requires_environment
     if __cached_interp_requires_environment is None:
+        # https://github.com/IronLanguages/ironpython3/issues/1440
+        if sys.implementation.name == "ironpython":
+            __cached_interp_requires_environment = True
+            return True
+
         # Try running an interpreter with -E to see if it works or not.
         try:
             subprocess.check_call([sys.executable, '-E',
@@ -63,6 +68,7 @@ def run_python_until_end(*args, **env_vars):
     else:
         isolated = not env_vars and not env_required
     cmd_line = [sys.executable, '-X', 'faulthandler']
+    if sys.implementation.name == "ironpython": del cmd_line[1:]
     if isolated:
         # isolated mode: ignore Python environment variables, ignore user
         # site-packages, and don't add the current directory to sys.path

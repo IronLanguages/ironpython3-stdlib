@@ -364,7 +364,7 @@ build.  The number of blocks must be greater than CO_MAXBLOCKS.  SF #1565514
    ...                   while 20:
    ...                    while 21:
    ...                     while 22:
-   ...                      break
+   ...                      assert False
    Traceback (most recent call last):
      ...
    SystemError: too many statically nested blocks
@@ -582,7 +582,7 @@ class SyntaxTestCase(unittest.TestCase):
                           subclass=IndentationError)
 
     def test_kwargs_last(self):
-        self._check_error("int(base=10, '2')", "non-keyword arg")
+        self._check_error("int(base=10, '2')", "positional argument follows keyword argument")
 
 def test_main():
     support.run_unittest(SyntaxTestCase)

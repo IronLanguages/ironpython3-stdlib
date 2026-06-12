@@ -587,7 +587,6 @@ def main():
     else:
         func(sys.stdin.buffer, sys.stdout.buffer)
 
-
 def test():
     s0 = b"Aladdin:open sesame"
     print(repr(s0))

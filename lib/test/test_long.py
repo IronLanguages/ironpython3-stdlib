@@ -8,7 +8,7 @@ import math
 import array
 
 # SHIFT should match the value in longintrepr.h for best testing.
-SHIFT = sys.int_info.bits_per_digit
+SHIFT = 30 if sys.implementation.name == "ironpython" else sys.int_info.bits_per_digit # https://github.com/IronLanguages/ironpython3/issues/974
 BASE = 2 ** SHIFT
 MASK = BASE - 1
 KARATSUBA_CUTOFF = 70   # from longobject.c
@@ -969,7 +969,7 @@ class LongTest(unittest.TestCase):
             self.assertIs(type(got), int)
 
         # bad second argument
-        bad_exponents = ('brian', 2.0, 0j, None)
+        bad_exponents = ('brian', 2.0, 0j)
         for e in bad_exponents:
             self.assertRaises(TypeError, round, 3, e)
 

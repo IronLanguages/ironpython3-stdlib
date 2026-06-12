@@ -754,6 +754,7 @@ class BytesTest(BaseBytesTest, unittest.TestCase):
         self.assertIs(type(BytesSubclass(A())), BytesSubclass)
 
     # Test PyBytes_FromFormat()
+    @unittest.skipIf(sys.implementation.name=='ironpython', 'CPython-specific test depending on ctypes.pythonapi')
     def test_from_format(self):
         test.support.import_module('ctypes')
         from ctypes import pythonapi, py_object, c_int, c_char_p
@@ -1497,4 +1498,4 @@ class BytesSubclassTest(SubclassTest, unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    test.support.run_unittest(__name__)

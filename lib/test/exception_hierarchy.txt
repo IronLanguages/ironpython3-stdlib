@@ -4,6 +4,8 @@ BaseException
  +-- GeneratorExit
  +-- Exception
       +-- StopIteration
+      +-- StopAsyncIteration
+      +-- CancelledError
       +-- ArithmeticError
       |    +-- FloatingPointError
       |    +-- OverflowError
@@ -13,6 +15,7 @@ BaseException
       +-- BufferError
       +-- EOFError
       +-- ImportError
+      |    +-- ModuleNotFoundError
       +-- LookupError
       |    +-- IndexError
       |    +-- KeyError
@@ -38,6 +41,7 @@ BaseException
       +-- ReferenceError
       +-- RuntimeError
       |    +-- NotImplementedError
+      |    +-- RecursionError
       +-- SyntaxError
       |    +-- IndentationError
       |         +-- TabError

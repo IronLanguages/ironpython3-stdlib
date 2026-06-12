@@ -538,6 +538,54 @@ class UrlParseTestCase(unittest.TestCase):
         p = urllib.parse.urlsplit(url)
         self.assertEqual(p.port, None)
 
+    def test_urlsplit_remove_unsafe_bytes(self):
+        # Remove ASCII tabs and newlines from input, for http common case scenario.
+        url = "h\nttp://www.python\n.org\t/java\nscript:\talert('msg\r\n')/?query\n=\tsomething#frag\nment"
+        p = urllib.parse.urlsplit(url)
+        self.assertEqual(p.scheme, "http")
+        self.assertEqual(p.netloc, "www.python.org")
+        self.assertEqual(p.path, "/javascript:alert('msg')/")
+        self.assertEqual(p.query, "query=something")
+        self.assertEqual(p.fragment, "fragment")
+        self.assertEqual(p.username, None)
+        self.assertEqual(p.password, None)
+        self.assertEqual(p.hostname, "www.python.org")
+        self.assertEqual(p.port, None)
+        self.assertEqual(p.geturl(), "http://www.python.org/javascript:alert('msg')/?query=something#fragment")
+
+        # Remove ASCII tabs and newlines from input as bytes, for http common case scenario.
+        url = b"h\nttp://www.python\n.org\t/java\nscript:\talert('msg\r\n')/?query\n=\tsomething#frag\nment"
+        p = urllib.parse.urlsplit(url)
+        self.assertEqual(p.scheme, b"http")
+        self.assertEqual(p.netloc, b"www.python.org")
+        self.assertEqual(p.path, b"/javascript:alert('msg')/")
+        self.assertEqual(p.query, b"query=something")
+        self.assertEqual(p.fragment, b"fragment")
+        self.assertEqual(p.username, None)
+        self.assertEqual(p.password, None)
+        self.assertEqual(p.hostname, b"www.python.org")
+        self.assertEqual(p.port, None)
+        self.assertEqual(p.geturl(), b"http://www.python.org/javascript:alert('msg')/?query=something#fragment")
+
+        # any scheme
+        url = "x-new-scheme\t://www.python\n.org\t/java\nscript:\talert('msg\r\n')/?query\n=\tsomething#frag\nment"
+        p = urllib.parse.urlsplit(url)
+        self.assertEqual(p.geturl(), "x-new-scheme://www.python.org/javascript:alert('msg')/?query=something#fragment")
+
+        # Remove ASCII tabs and newlines from input as bytes, any scheme.
+        url = b"x-new-scheme\t://www.python\n.org\t/java\nscript:\talert('msg\r\n')/?query\n=\tsomething#frag\nment"
+        p = urllib.parse.urlsplit(url)
+        self.assertEqual(p.geturl(), b"x-new-scheme://www.python.org/javascript:alert('msg')/?query=something#fragment")
+
+        # Unsafe bytes is not returned from urlparse cache.
+        # scheme is stored after parsing, sending an scheme with unsafe bytes *will not* return an unsafe scheme
+        url = "https://www.python\n.org\t/java\nscript:\talert('msg\r\n')/?query\n=\tsomething#frag\nment"
+        scheme = "htt\nps"
+        for _ in range(2):
+            p = urllib.parse.urlsplit(url, scheme=scheme)
+            self.assertEqual(p.scheme, "https")
+            self.assertEqual(p.geturl(), "https://www.python.org/javascript:alert('msg')/?query=something#fragment")
+
     def test_attributes_bad_port(self):
         """Check handling of non-integer ports."""
         p = urllib.parse.urlsplit("http://www.example.net:foo")
@@ -876,8 +924,9 @@ class UrlParseTestCase(unittest.TestCase):
         # Ensure that ALL of them are detected and cause an error
         illegal_chars = '/:#?@'
         hex_chars = {'{:04X}'.format(ord(c)) for c in illegal_chars}
+        maxunicode = 0xffff if sys.implementation.name == "ironpython" else sys.maxunicode # https://github.com/IronLanguages/ironpython3/issues/252
         denorm_chars = [
-            c for c in map(chr, range(128, sys.maxunicode))
+            c for c in map(chr, range(128, maxunicode))
             if (hex_chars & set(unicodedata.decomposition(c).split()))
             and c not in illegal_chars
         ]
@@ -885,10 +934,20 @@ class UrlParseTestCase(unittest.TestCase):
         self.assertIn('\u2100', denorm_chars)
         self.assertIn('\uFF03', denorm_chars)
 
+        # https://github.com/IronLanguages/ironpython3/issues/614
+        is_mono = False
+        mono_issue_chars = ("\ufe13", "\ufe16", "\ufe5f")
+        if sys.implementation.name == "ironpython":
+            import clr
+            is_mono = clr.IsMono
+
         for scheme in ["http", "https", "ftp"]:
             for c in denorm_chars:
                 url = "{}://netloc{}false.netloc/path".format(scheme, c)
                 with self.subTest(url=url, char='{:04X}'.format(ord(c))):
+                    if is_mono and c in mono_issue_chars:
+                        urllib.parse.urlsplit(url) # ensure we fail if this ever gets fixed
+                        continue
                     with self.assertRaises(ValueError):
                         urllib.parse.urlsplit(url)
 

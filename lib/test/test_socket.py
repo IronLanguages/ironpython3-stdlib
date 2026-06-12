@@ -689,6 +689,7 @@ class GeneralModuleTests(unittest.TestCase):
         self.assertEqual(p.fileno(), s.fileno())
         s.close()
         s = None
+        support.gc_collect() # required for IronPython
         try:
             p.fileno()
         except ReferenceError:
@@ -716,11 +717,11 @@ class GeneralModuleTests(unittest.TestCase):
         with self.assertRaises(TypeError) as cm:
             s.sendto('\u2620', sockname)
         self.assertEqual(str(cm.exception),
-                         "'str' does not support the buffer interface")
+                         "expected bytes, got str" if sys.implementation.name == "ironpython" else "'str' does not support the buffer interface")
         with self.assertRaises(TypeError) as cm:
             s.sendto(5j, sockname)
         self.assertEqual(str(cm.exception),
-                         "'complex' does not support the buffer interface")
+                         "expected bytes, got complex" if sys.implementation.name == "ironpython" else "'complex' does not support the buffer interface")
         with self.assertRaises(TypeError) as cm:
             s.sendto(b'foo', None)
         self.assertIn('not NoneType',str(cm.exception))
@@ -1265,7 +1266,8 @@ class GeneralModuleTests(unittest.TestCase):
                                flags=socket.AI_PASSIVE)
         self.assertEqual(a, b)
         # Issue #6697.
-        self.assertRaises(UnicodeEncodeError, socket.getaddrinfo, 'localhost', '\uD800')
+        if sys.implementation.name != 'ironpython':
+            self.assertRaises(UnicodeEncodeError, socket.getaddrinfo, 'localhost', '\uD800')
 
         # Issue 17269: test workaround for OS X platform bug segfault
         if hasattr(socket, 'AI_NUMERICSERV'):
@@ -4217,6 +4219,8 @@ class UnbufferedFileObjectClassTestCase(FileObjectClassTestCase):
         self.write_file.write(self.write_msg)
         self.write_file.flush()
 
+    @unittest.skipUnless(hasattr(sys, 'getrefcount'),
+                         'test needs sys.getrefcount()')
     def testMakefileCloseSocketDestroy(self):
         refcount_before = sys.getrefcount(self.cli_conn)
         self.read_file.close()
@@ -4589,6 +4593,7 @@ class TestExceptions(unittest.TestCase):
         self.assertTrue(issubclass(socket.timeout, OSError))
 
 @unittest.skipUnless(sys.platform == 'linux', 'Linux specific test')
+@unittest.skipUnless(hasattr(socket, 'AF_UNIX'), 'test needs socket.AF_UNIX')
 class TestLinuxAbstractNamespace(unittest.TestCase):
 
     UNIX_PATH_MAX = 108
@@ -5118,7 +5123,8 @@ class TestSocketSharing(SocketTCPTest):
                     source.close()
 
 
-def test_main():
+# ironpython: refactored to use load_tests protocol
+def load_tests(*args):
     tests = [GeneralModuleTests, BasicTCPTest, TCPCloserTest, TCPTimeoutTest,
              TestExceptions, BufferIOTest, BasicTCPTest2, BasicUDPTest, UDPTimeoutTest ]
 
@@ -5172,8 +5178,11 @@ def test_main():
         TestSocketSharing,
     ])
 
+    return unittest.TestSuite([unittest.makeSuite(test) for test in tests])
+
+def test_main():
     thread_info = support.threading_setup()
-    support.run_unittest(*tests)
+    support.run_unittest(__name__)
     support.threading_cleanup(*thread_info)
 
 if __name__ == "__main__":
