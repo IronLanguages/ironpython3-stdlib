@@ -266,7 +266,12 @@ class TestCurses(unittest.TestCase):
         stdscr.echochar(b'A')
         stdscr.echochar(65)
         with self.assertRaises((UnicodeEncodeError, OverflowError)):
-            stdscr.echochar('\u20ac')
+            # Unicode is not fully supported yet, but at least it does
+            # not crash.
+            # It is supposed to fail because either the character is
+            # not encodable with the current encoding, or it is encoded to
+            # a multibyte sequence.
+            stdscr.echochar('\u0114')
         stdscr.echochar('A', curses.A_BOLD)
         self.assertIs(stdscr.is_wintouched(), False)
 
@@ -831,6 +836,22 @@ class TestCurses(unittest.TestCase):
                     curses.curs_set(vis)
                 except curses.error:
                     pass
+
+    @requires_curses_func('get_escdelay')
+    def test_escdelay(self):
+        escdelay = curses.get_escdelay()
+        self.assertIsInstance(escdelay, int)
+        curses.set_escdelay(25)
+        self.assertEqual(curses.get_escdelay(), 25)
+        curses.set_escdelay(escdelay)
+
+    @requires_curses_func('get_tabsize')
+    def test_tabsize(self):
+        tabsize = curses.get_tabsize()
+        self.assertIsInstance(tabsize, int)
+        curses.set_tabsize(4)
+        self.assertEqual(curses.get_tabsize(), 4)
+        curses.set_tabsize(tabsize)
 
     @requires_curses_func('getsyx')
     def test_getsyx(self):

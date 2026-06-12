@@ -2,7 +2,6 @@ import unittest
 import tkinter
 from tkinter import TclError
 import os
-import sys
 from test.support import requires
 
 from tkinter.test.support import (tcl_version, requires_tcl,
@@ -267,8 +266,6 @@ class MenubuttonTest(AbstractLabelTest, unittest.TestCase):
     test_configure_highlightthickness = \
         StandardOptionsTests.test_configure_highlightthickness
 
-    @unittest.skipIf(sys.platform == 'darwin',
-                     'crashes with Cocoa Tk (issue19733)')
     def test_configure_image(self):
         widget = self.create()
         image = tkinter.PhotoImage(master=self.root, name='image1')
@@ -653,7 +650,9 @@ class TextTest(AbstractWidgetTest, unittest.TestCase):
         else:
             self.checkParam(widget, 'tabs', (10.2, 20.7, '1i', '2i'))
         self.checkParam(widget, 'tabs', '10.2 20.7 1i 2i',
-                        expected=('10.2', '20.7', '1i', '2i'))
+                        expected=(10.2, 20.7, '1i', '2i')
+                                 if get_tk_patchlevel() >= (8, 6, 14)
+                                 else ('10.2', '20.7', '1i', '2i'))
         self.checkParam(widget, 'tabs', '2c left 4c 6c center',
                         expected=('2c', 'left', '4c', '6c', 'center'))
         self.checkInvalidParam(widget, 'tabs', 'spam',
@@ -803,7 +802,7 @@ class ListboxTest(AbstractWidgetTest, unittest.TestCase):
         self.checkEnumParam(widget, 'activestyle',
                             'dotbox', 'none', 'underline')
 
-    test_justify = requires_tcl(8, 6, 5)(StandardOptionsTests.test_configure_justify)
+    test_configure_justify = requires_tcl(8, 6, 5)(StandardOptionsTests.test_configure_justify)
 
     def test_configure_listvariable(self):
         widget = self.create()
@@ -833,12 +832,16 @@ class ListboxTest(AbstractWidgetTest, unittest.TestCase):
             widget.itemconfigure()
         with self.assertRaisesRegex(TclError, 'bad listbox index "red"'):
             widget.itemconfigure('red')
+        if get_tk_patchlevel() >= (8, 6, 14):
+            prefix = ('background', '', '', '')
+        else:
+            prefix = ('background', 'background', 'Background', '')
         self.assertEqual(widget.itemconfigure(0, 'background'),
-                         ('background', 'background', 'Background', '', 'red'))
+                         (*prefix, 'red'))
         self.assertEqual(widget.itemconfigure('end', 'background'),
-                         ('background', 'background', 'Background', '', 'violet'))
+                         (*prefix, 'violet'))
         self.assertEqual(widget.itemconfigure('@0,0', 'background'),
-                         ('background', 'background', 'Background', '', 'red'))
+                         (*prefix, 'red'))
 
         d = widget.itemconfigure(0)
         self.assertIsInstance(d, dict)
@@ -942,7 +945,7 @@ class ScaleTest(AbstractWidgetTest, unittest.TestCase):
 
     def test_configure_from(self):
         widget = self.create()
-        conv = False if get_tk_patchlevel() >= (8, 6, 10) else float_round
+        conv = float if get_tk_patchlevel() >= (8, 6, 10) else float_round
         self.checkFloatParam(widget, 'from', 100, 14.9, 15.1, conv=conv)
 
     def test_configure_label(self):

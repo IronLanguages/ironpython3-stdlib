@@ -445,6 +445,27 @@ class TestMessageAPI(TestEmailBase):
             "Content-Type: foo; bar*0=\"baz\\\"foobar\"; bar*1=\"\\\"baz\"")
         self.assertEqual(msg.get_param('bar'), 'baz"foobar"baz')
 
+    def test_get_param_linear_complexity(self):
+        # Ensure that email.message._parseparam() is fast.
+        # See https://github.com/python/cpython/issues/136063.
+        N = 100_000
+        for s, r in [
+            ("", ""),
+            ("foo=bar", "foo=bar"),
+            (" FOO = bar    ", "foo=bar"),
+        ]:
+            with self.subTest(s=s, r=r, N=N):
+                src = f'{s};' * (N - 1) + s
+                res = email.message._parseparam(src)
+                self.assertEqual(len(res), N)
+                self.assertEqual(len(set(res)), 1)
+                self.assertEqual(res[0], r)
+
+        # This will be considered as a single parameter.
+        malformed = 's="' + ';' * (N - 1)
+        res = email.message._parseparam(malformed)
+        self.assertEqual(res, [malformed])
+
     def test_field_containment(self):
         msg = email.message_from_string('Header: exists')
         self.assertIn('header', msg)
@@ -1044,7 +1065,7 @@ Test""")
 Subject: the first part of this is short,
  but_the_second_part_does_not_fit_within_maxlinelen_and_thus_should_be_on_a_line_all_by_itself""")
 
-    def test_splittable_leading_char_followed_by_overlong_unsplitable(self):
+    def test_splittable_leading_char_followed_by_overlong_unsplittable(self):
         eq = self.ndiffAssertEqual
         h = Header(', but_the_second'
             '_part_does_not_fit_within_maxlinelen_and_thus_should_be_on_a_line'
@@ -1053,7 +1074,7 @@ Subject: the first part of this is short,
 ,
  but_the_second_part_does_not_fit_within_maxlinelen_and_thus_should_be_on_a_line_all_by_itself""")
 
-    def test_multiple_splittable_leading_char_followed_by_overlong_unsplitable(self):
+    def test_multiple_splittable_leading_char_followed_by_overlong_unsplittable(self):
         eq = self.ndiffAssertEqual
         h = Header(', , but_the_second'
             '_part_does_not_fit_within_maxlinelen_and_thus_should_be_on_a_line'
@@ -1062,14 +1083,14 @@ Subject: the first part of this is short,
 , ,
  but_the_second_part_does_not_fit_within_maxlinelen_and_thus_should_be_on_a_line_all_by_itself""")
 
-    def test_trailing_splitable_on_overlong_unsplitable(self):
+    def test_trailing_splittable_on_overlong_unsplittable(self):
         eq = self.ndiffAssertEqual
         h = Header('this_part_does_not_fit_within_maxlinelen_and_thus_should_'
             'be_on_a_line_all_by_itself;')
         eq(h.encode(), "this_part_does_not_fit_within_maxlinelen_and_thus_should_"
             "be_on_a_line_all_by_itself;")
 
-    def test_trailing_splitable_on_overlong_unsplitable_with_leading_splitable(self):
+    def test_trailing_splittable_on_overlong_unsplittable_with_leading_splittable(self):
         eq = self.ndiffAssertEqual
         h = Header('; '
             'this_part_does_not_fit_within_maxlinelen_and_thus_should_'
@@ -1502,7 +1523,7 @@ Blah blah blah
         g.flatten(msg)
         self.assertEqual(b.getvalue(), source + b'>From R\xc3\xb6lli\n')
 
-    def test_mutltipart_with_bad_bytes_in_cte(self):
+    def test_multipart_with_bad_bytes_in_cte(self):
         # bpo30835
         source = textwrap.dedent("""\
             From: aperson@example.com
@@ -2743,6 +2764,20 @@ message 2
         self.assertEqual(str(cm.exception),
                          'There may be at most 1 To headers in a message')
 
+
+# Test the NonMultipart class
+class TestNonMultipart(TestEmailBase):
+    def test_nonmultipart_is_not_multipart(self):
+        msg = MIMENonMultipart('text', 'plain')
+        self.assertFalse(msg.is_multipart())
+
+    def test_attach_raises_exception(self):
+        msg = Message()
+        msg['Subject'] = 'subpart 1'
+        r = MIMENonMultipart('text', 'plain')
+        self.assertRaises(errors.MultipartConversionError, r.attach, msg)
+
+
 # A general test of parser->model->generator idempotency.  IOW, read a message
 # in, parse it into a message object tree, then without touching the tree,
 # regenerate the plain text.  The original text and the transformed text
@@ -3009,6 +3044,7 @@ class TestMiscellaneous(TestEmailBase):
         self.assertIsNone(utils.parsedate_tz('0'))
         self.assertIsNone(utils.parsedate('A Complete Waste of Time'))
         self.assertIsNone(utils.parsedate_tz('A Complete Waste of Time'))
+        self.assertIsNone(utils.parsedate_tz('Wed, 3 Apr 2002 12.34.56.78+0800'))
         # Not a part of the spec but, but this has historically worked:
         self.assertIsNone(utils.parsedate(None))
         self.assertIsNone(utils.parsedate_tz(None))
@@ -3403,6 +3439,11 @@ Foo
         eq = self.assertEqual
         addrs = utils.getaddresses(['User ((nested comment)) <foo@bar.com>'])
         eq(addrs[0][1], 'foo@bar.com')
+
+    def test_getaddresses_header_obj(self):
+        """Test the handling of a Header object."""
+        addrs = utils.getaddresses([Header('Al Person <aperson@dom.ain>')])
+        self.assertEqual(addrs[0][1], 'aperson@dom.ain')
 
     def test_make_msgid_collisions(self):
         # Test make_msgid uniqueness, even with multiple threads
@@ -5490,6 +5531,15 @@ Content-Disposition: inline;
         m = """\
 Content-Transfer-Encoding: 8bit
 Content-Disposition: inline; filename*=X-UNKNOWN''myfile.txt
+
+"""
+        msg = email.message_from_string(m)
+        self.assertEqual(msg.get_filename(), 'myfile.txt')
+
+    def test_rfc2231_bad_character_in_encoding(self):
+        m = """\
+Content-Transfer-Encoding: 8bit
+Content-Disposition: inline; filename*=utf-8\udce2\udc80\udc9d''myfile.txt
 
 """
         msg = email.message_from_string(m)

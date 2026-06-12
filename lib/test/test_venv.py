@@ -14,13 +14,14 @@ import struct
 import subprocess
 import sys
 import tempfile
+import shlex
 from test.support import (captured_stdout, captured_stderr, requires_zlib,
                           can_symlink, EnvironmentVarGuard, rmtree,
                           import_module,
                           skip_if_broken_multiprocessing_synchronize)
-import threading
 import unittest
 import venv
+from unittest.mock import patch
 
 try:
     import ctypes
@@ -80,10 +81,14 @@ class BaseTest(unittest.TestCase):
     def get_env_file(self, *args):
         return os.path.join(self.env_dir, *args)
 
-    def get_text_file_contents(self, *args):
-        with open(self.get_env_file(*args), 'r') as f:
+    def get_text_file_contents(self, *args, encoding='utf-8'):
+        with open(self.get_env_file(*args), 'r', encoding=encoding) as f:
             result = f.read()
         return result
+
+    def assertEndsWith(self, string, tail):
+        if not string.endswith(tail):
+            self.fail(f"String {string!r} does not end with {tail!r}")
 
 class BasicTest(BaseTest):
     """Test venv module functionality."""
@@ -138,6 +143,45 @@ class BasicTest(BaseTest):
         data = self.get_text_file_contents('pyvenv.cfg')
         self.assertEqual(context.prompt, '(My prompt) ')
         self.assertIn("prompt = 'My prompt'\n", data)
+
+        rmtree(self.env_dir)
+        builder = venv.EnvBuilder(prompt='.')
+        cwd = os.path.basename(os.getcwd())
+        self.run_with_capture(builder.create, self.env_dir)
+        context = builder.ensure_directories(self.env_dir)
+        data = self.get_text_file_contents('pyvenv.cfg')
+        self.assertEqual(context.prompt, '(%s) ' % cwd)
+        self.assertIn("prompt = '%s'\n" % cwd, data)
+
+    def test_upgrade_dependencies(self):
+        builder = venv.EnvBuilder()
+        bin_path = 'Scripts' if sys.platform == 'win32' else 'bin'
+        python_exe = os.path.split(sys.executable)[1]
+        with tempfile.TemporaryDirectory() as fake_env_dir:
+            expect_exe = os.path.normcase(
+                os.path.join(fake_env_dir, bin_path, python_exe)
+            )
+            if sys.platform == 'win32':
+                expect_exe = os.path.normcase(os.path.realpath(expect_exe))
+
+            def pip_cmd_checker(cmd):
+                cmd[0] = os.path.normcase(cmd[0])
+                self.assertEqual(
+                    cmd,
+                    [
+                        expect_exe,
+                        '-m',
+                        'pip',
+                        'install',
+                        '--upgrade',
+                        'pip',
+                        'setuptools'
+                    ]
+                )
+
+            fake_context = builder.ensure_directories(fake_env_dir)
+            with patch('venv.subprocess.check_call', pip_cmd_checker):
+                builder.upgrade_dependencies(fake_context)
 
     @requireVenvCreate
     def test_prefixes(self):
@@ -302,6 +346,82 @@ class BasicTest(BaseTest):
         out, err = check_output([envpy, '-c',
             'import sys; print(sys.executable)'])
         self.assertEqual(out.strip(), envpy.encode())
+
+    # gh-124651: test quoted strings
+    @unittest.skipIf(os.name == 'nt', 'contains invalid characters on Windows')
+    def test_special_chars_bash(self):
+        """
+        Test that the template strings are quoted properly (bash)
+        """
+        rmtree(self.env_dir)
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('bash required for this test')
+        env_name = '"\';&&$e|\'"'
+        env_dir = os.path.join(os.path.realpath(self.env_dir), env_name)
+        builder = venv.EnvBuilder(clear=True)
+        builder.create(env_dir)
+        activate = os.path.join(env_dir, self.bindir, 'activate')
+        test_script = os.path.join(self.env_dir, 'test_special_chars.sh')
+        with open(test_script, "w") as f:
+            f.write(f'source {shlex.quote(activate)}\n'
+                    'python -c \'import sys; print(sys.executable)\'\n'
+                    'python -c \'import os; print(os.environ["VIRTUAL_ENV"])\'\n'
+                    'deactivate\n')
+        out, err = check_output([bash, test_script])
+        lines = out.splitlines()
+        self.assertTrue(env_name.encode() in lines[0])
+        self.assertEndsWith(lines[1], env_name.encode())
+
+    # gh-124651: test quoted strings
+    @unittest.skipIf(os.name == 'nt', 'contains invalid characters on Windows')
+    def test_special_chars_csh(self):
+        """
+        Test that the template strings are quoted properly (csh)
+        """
+        rmtree(self.env_dir)
+        csh = shutil.which('tcsh') or shutil.which('csh')
+        if csh is None:
+            self.skipTest('csh required for this test')
+        env_name = '"\';&&$e|\'"'
+        env_dir = os.path.join(os.path.realpath(self.env_dir), env_name)
+        builder = venv.EnvBuilder(clear=True)
+        builder.create(env_dir)
+        activate = os.path.join(env_dir, self.bindir, 'activate.csh')
+        test_script = os.path.join(self.env_dir, 'test_special_chars.csh')
+        with open(test_script, "w") as f:
+            f.write(f'source {shlex.quote(activate)}\n'
+                    'python -c \'import sys; print(sys.executable)\'\n'
+                    'python -c \'import os; print(os.environ["VIRTUAL_ENV"])\'\n'
+                    'deactivate\n')
+        out, err = check_output([csh, test_script])
+        lines = out.splitlines()
+        self.assertTrue(env_name.encode() in lines[0])
+        self.assertEndsWith(lines[1], env_name.encode())
+
+    # gh-124651: test quoted strings on Windows
+    @unittest.skipUnless(os.name == 'nt', 'only relevant on Windows')
+    def test_special_chars_windows(self):
+        """
+        Test that the template strings are quoted properly on Windows
+        """
+        rmtree(self.env_dir)
+        env_name = "'&&^$e"
+        env_dir = os.path.join(os.path.realpath(self.env_dir), env_name)
+        builder = venv.EnvBuilder(clear=True)
+        builder.create(env_dir)
+        activate = os.path.join(env_dir, self.bindir, 'activate.bat')
+        test_batch = os.path.join(self.env_dir, 'test_special_chars.bat')
+        with open(test_batch, "w") as f:
+            f.write('@echo off\n'
+                    f'"{activate}" & '
+                    f'{self.exe} -c "import sys; print(sys.executable)" & '
+                    f'{self.exe} -c "import os; print(os.environ[\'VIRTUAL_ENV\'])" & '
+                    'deactivate')
+        out, err = check_output([test_batch])
+        lines = out.splitlines()
+        self.assertTrue(env_name.encode() in lines[0])
+        self.assertEndsWith(lines[1], env_name.encode())
 
     @unittest.skipUnless(os.name == 'nt', 'only relevant on Windows')
     def test_unicode_in_batch_file(self):
@@ -499,7 +619,7 @@ class EnsurePipTest(BaseTest):
 
     # Issue #26610: pip/pep425tags.py requires ctypes
     @unittest.skipUnless(ctypes, 'pip requires ctypes')
-    @requires_zlib
+    @requires_zlib()
     def test_with_pip(self):
         self.do_test_with_pip(False)
         self.do_test_with_pip(True)

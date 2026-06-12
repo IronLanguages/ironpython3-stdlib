@@ -4,6 +4,7 @@ import sys
 import unittest
 import unittest.mock
 from test import support
+from test.support import socket_helper, warnings_helper
 import re
 import socket
 import select
@@ -32,8 +33,11 @@ ssl = support.import_module("ssl")
 
 from ssl import TLSVersion, _TLSContentType, _TLSMessageType
 
+Py_DEBUG = hasattr(sys, 'gettotalrefcount')
+Py_DEBUG_WIN32 = Py_DEBUG and sys.platform == 'win32'
+
 PROTOCOLS = sorted(ssl._PROTOCOL_NAMES)
-HOST = support.HOST
+HOST = socket_helper.HOST
 IS_LIBRESSL = ssl.OPENSSL_VERSION.startswith('LibreSSL')
 IS_OPENSSL_1_1_0 = not IS_LIBRESSL and ssl.OPENSSL_VERSION_INFO >= (1, 1, 0)
 IS_OPENSSL_1_1_1 = not IS_LIBRESSL and ssl.OPENSSL_VERSION_INFO >= (1, 1, 1)
@@ -149,9 +153,6 @@ OP_SINGLE_ECDH_USE = getattr(ssl, "OP_SINGLE_ECDH_USE", 0)
 OP_CIPHER_SERVER_PREFERENCE = getattr(ssl, "OP_CIPHER_SERVER_PREFERENCE", 0)
 OP_ENABLE_MIDDLEBOX_COMPAT = getattr(ssl, "OP_ENABLE_MIDDLEBOX_COMPAT", 0)
 OP_IGNORE_UNEXPECTED_EOF = getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0)
-
-# *_TIMEOUT constants are available in test.support in 3.9+
-SHORT_TIMEOUT = 30.0
 
 # Ubuntu has patched OpenSSL and changed behavior of security level 2
 # see https://bugs.python.org/issue41561#msg389003
@@ -445,8 +446,7 @@ class BasicSocketTests(unittest.TestCase):
         else:
             os.close(wfd)
             self.addCleanup(os.close, rfd)
-            _, status = os.waitpid(pid, 0)
-            self.assertEqual(status, 0)
+            support.wait_process(pid, exitcode=0)
 
             child_random = os.read(rfd, 16)
             self.assertEqual(len(child_random), 16)
@@ -592,7 +592,6 @@ class BasicSocketTests(unittest.TestCase):
         self.assertLessEqual(patch, 63)
         self.assertGreaterEqual(status, 0)
         self.assertLessEqual(status, 15)
-
         libressl_ver = f"LibreSSL {major:d}"
         if major >= 3:
             # 3.x uses 0xMNN00PP0L
@@ -804,7 +803,7 @@ class BasicSocketTests(unittest.TestCase):
         fail(cert, 'example.net')
 
         # -- IPv6 matching --
-        if support.IPV6_ENABLED:
+        if socket_helper.IPV6_ENABLED:
             cert = {'subject': ((('commonName', 'example.com'),),),
                     'subjectAltName': (
                         ('DNS', 'example.com'),
@@ -887,7 +886,7 @@ class BasicSocketTests(unittest.TestCase):
                 ssl._inet_paton(invalid)
         for ipaddr in ['127.0.0.1', '192.168.0.1']:
             self.assertTrue(ssl._inet_paton(ipaddr))
-        if support.IPV6_ENABLED:
+        if socket_helper.IPV6_ENABLED:
             for ipaddr in ['::1', '2001:db8:85a3::8a2e:370:7334']:
                 self.assertTrue(ssl._inet_paton(ipaddr))
 
@@ -1115,7 +1114,7 @@ class BasicSocketTests(unittest.TestCase):
     def test_connect_ex_error(self):
         server = socket.socket(socket.AF_INET)
         self.addCleanup(server.close)
-        port = support.bind_port(server)  # Reserve port but don't listen
+        port = socket_helper.bind_port(server)  # Reserve port but don't listen
         s = test_wrap_socket(socket.socket(socket.AF_INET),
                             cert_reqs=ssl.CERT_REQUIRED)
         self.addCleanup(s.close)
@@ -1134,10 +1133,10 @@ class ContextTests(unittest.TestCase):
     def test_constructor(self):
         for protocol in PROTOCOLS:
             if has_tls_protocol(protocol):
-                with support.check_warnings():
+                with warnings_helper.check_warnings():
                     ctx = ssl.SSLContext(protocol)
                 self.assertEqual(ctx.protocol, protocol)
-        with support.check_warnings():
+        with warnings_helper.check_warnings():
             ctx = ssl.SSLContext()
         self.assertEqual(ctx.protocol, ssl.PROTOCOL_TLS)
         self.assertRaises(ValueError, ssl.SSLContext, -1)
@@ -1145,8 +1144,10 @@ class ContextTests(unittest.TestCase):
 
     def test_protocol(self):
         for proto in PROTOCOLS:
-            ctx = ssl.SSLContext(proto)
-            self.assertEqual(ctx.protocol, proto)
+            if has_tls_protocol(proto):
+                with warnings_helper.check_warnings():
+                    ctx = ssl.SSLContext(proto)
+                self.assertEqual(ctx.protocol, proto)
 
     def test_ciphers(self):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -1173,8 +1174,20 @@ class ContextTests(unittest.TestCase):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.set_ciphers('AESGCM')
         names = set(d['name'] for d in ctx.get_ciphers())
-        self.assertIn('AES256-GCM-SHA384', names)
-        self.assertIn('AES128-GCM-SHA256', names)
+        expected = {
+            'AES128-GCM-SHA256',
+            'ECDHE-ECDSA-AES128-GCM-SHA256',
+            'ECDHE-RSA-AES128-GCM-SHA256',
+            'DHE-RSA-AES128-GCM-SHA256',
+            'AES256-GCM-SHA384',
+            'ECDHE-ECDSA-AES256-GCM-SHA384',
+            'ECDHE-RSA-AES256-GCM-SHA384',
+            'DHE-RSA-AES256-GCM-SHA384',
+        }
+        intersection = names.intersection(expected)
+        self.assertGreaterEqual(
+            len(intersection), 2, f"\ngot: {sorted(names)}\nexpected: {sorted(expected)}"
+        )
 
     def test_options(self):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -1500,6 +1513,7 @@ class ContextTests(unittest.TestCase):
         ):
             ctx.load_verify_locations(cadata=b"broken")
 
+    @unittest.skipIf(Py_DEBUG_WIN32, "Avoid mixing debug/release CRT on Windows")
     def test_load_dh_params(self):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_dh_params(DHFILE)
@@ -1515,7 +1529,10 @@ class ContextTests(unittest.TestCase):
 
     def test_session_stats(self):
         for proto in PROTOCOLS:
-            ctx = ssl.SSLContext(proto)
+            if not has_tls_protocol(proto):
+                continue
+            with warnings_helper.check_warnings():
+                ctx = ssl.SSLContext(proto)
             self.assertEqual(ctx.session_stats(), {
                 'number': 0,
                 'connect': 0,
@@ -1700,19 +1717,20 @@ class ContextTests(unittest.TestCase):
         self._assert_context_options(ctx)
 
         if has_tls_protocol(ssl.PROTOCOL_TLSv1):
-            with support.check_warnings():
+            with warnings_helper.check_warnings():
                 ctx = ssl._create_stdlib_context(ssl.PROTOCOL_TLSv1)
             self.assertEqual(ctx.protocol, ssl.PROTOCOL_TLSv1)
             self.assertEqual(ctx.verify_mode, ssl.CERT_NONE)
             self._assert_context_options(ctx)
 
-        ctx = ssl._create_stdlib_context(ssl.PROTOCOL_TLSv1,
-                                         cert_reqs=ssl.CERT_REQUIRED,
-                                         check_hostname=True)
-        self.assertEqual(ctx.protocol, ssl.PROTOCOL_TLSv1)
-        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
-        self.assertTrue(ctx.check_hostname)
-        self._assert_context_options(ctx)
+            with warnings_helper.check_warnings():
+                ctx = ssl._create_stdlib_context(ssl.PROTOCOL_TLSv1,
+                                                cert_reqs=ssl.CERT_REQUIRED,
+                                                check_hostname=True)
+            self.assertEqual(ctx.protocol, ssl.PROTOCOL_TLSv1)
+            self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+            self.assertTrue(ctx.check_hostname)
+            self._assert_context_options(ctx)
 
         ctx = ssl._create_stdlib_context(purpose=ssl.Purpose.CLIENT_AUTH)
         self.assertEqual(ctx.protocol, ssl.PROTOCOL_TLS)
@@ -1820,6 +1838,7 @@ class SSLErrorTests(unittest.TestCase):
         self.assertEqual(str(e), "foo")
         self.assertEqual(e.errno, 1)
 
+    @unittest.skipIf(Py_DEBUG_WIN32, "Avoid mixing debug/release CRT on Windows")
     def test_lib_reason(self):
         # Test the library and reason attributes
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -2207,7 +2226,7 @@ class SimpleBackgroundTests(unittest.TestCase):
     def ssl_io_loop(self, sock, incoming, outgoing, func, *args, **kwargs):
         # A simple IO loop. Call func(*args) depending on the error we get
         # (WANT_READ or WANT_WRITE) move data between the socket and the BIOs.
-        timeout = kwargs.get('timeout', 10)
+        timeout = kwargs.get('timeout', support.SHORT_TIMEOUT)
         deadline = time.monotonic() + timeout
         count = 0
         while True:
@@ -2292,12 +2311,13 @@ class SimpleBackgroundTests(unittest.TestCase):
         self.ssl_io_loop(sock, incoming, outgoing, sslobj.unwrap)
 
 
+@support.requires_resource('network')
 class NetworkedTests(unittest.TestCase):
 
     def test_timeout_connect_ex(self):
         # Issue #12065: on a timeout, connect_ex() should return the original
         # errno (mimicking the behaviour of non-SSL sockets).
-        with support.transient_internet(REMOTE_HOST):
+        with socket_helper.transient_internet(REMOTE_HOST):
             s = test_wrap_socket(socket.socket(socket.AF_INET),
                                 cert_reqs=ssl.CERT_REQUIRED,
                                 do_handshake_on_connect=False)
@@ -2310,9 +2330,9 @@ class NetworkedTests(unittest.TestCase):
                 self.skipTest("Network unreachable.")
             self.assertIn(rc, (errno.EAGAIN, errno.EWOULDBLOCK))
 
-    @unittest.skipUnless(support.IPV6_ENABLED, 'Needs IPv6')
+    @unittest.skipUnless(socket_helper.IPV6_ENABLED, 'Needs IPv6')
     def test_get_server_certificate_ipv6(self):
-        with support.transient_internet('ipv6.google.com'):
+        with socket_helper.transient_internet('ipv6.google.com'):
             _test_get_server_certificate(self, 'ipv6.google.com', 443)
             _test_get_server_certificate_fail(self, 'ipv6.google.com', 443)
 
@@ -2354,7 +2374,7 @@ class ThreadedEchoServer(threading.Thread):
             self.running = False
             self.sock = connsock
             self.addr = addr
-            self.sock.setblocking(1)
+            self.sock.setblocking(True)
             self.sslconn = None
             threading.Thread.__init__(self)
             self.daemon = True
@@ -2570,7 +2590,7 @@ class ThreadedEchoServer(threading.Thread):
         self.connectionchatty = connectionchatty
         self.starttls_server = starttls_server
         self.sock = socket.socket()
-        self.port = support.bind_port(self.sock)
+        self.port = socket_helper.bind_port(self.sock)
         self.flag = None
         self.active = False
         self.selected_npn_protocols = []
@@ -2683,7 +2703,7 @@ class AsyncoreEchoServer(threading.Thread):
         def __init__(self, certfile):
             self.certfile = certfile
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.port = support.bind_port(sock, '')
+            self.port = socket_helper.bind_port(sock, '')
             asyncore.dispatcher.__init__(self, sock)
             self.listen(5)
 
@@ -3230,7 +3250,7 @@ class ThreadedTests(unittest.TestCase):
         listener_gone = threading.Event()
 
         s = socket.socket()
-        port = support.bind_port(s, HOST)
+        port = socket_helper.bind_port(s, HOST)
 
         # `listener` runs in a thread.  It sits in an accept() until
         # the main thread connects.  Then it rudely closes the socket,
@@ -3436,7 +3456,7 @@ class ThreadedTests(unittest.TestCase):
         wrapped = False
         with server:
             s = socket.socket()
-            s.setblocking(1)
+            s.setblocking(True)
             s.connect((HOST, server.port))
             if support.verbose:
                 sys.stdout.write("\n")
@@ -3728,7 +3748,7 @@ class ThreadedTests(unittest.TestCase):
         # Issue #5103: SSL handshake must respect the socket timeout
         server = socket.socket(socket.AF_INET)
         host = "127.0.0.1"
-        port = support.bind_port(server)
+        port = socket_helper.bind_port(server)
         started = threading.Event()
         finish = False
 
@@ -3782,7 +3802,7 @@ class ThreadedTests(unittest.TestCase):
         context.load_cert_chain(SIGNED_CERTFILE)
         server = socket.socket(socket.AF_INET)
         host = "127.0.0.1"
-        port = support.bind_port(server)
+        port = socket_helper.bind_port(server)
         server = context.wrap_socket(server, server_side=True)
         self.assertTrue(server.server_side)
 
@@ -4051,6 +4071,7 @@ class ThreadedTests(unittest.TestCase):
                                    sni_name=hostname)
         self.assertIs(stats['compression'], None)
 
+    @unittest.skipIf(Py_DEBUG_WIN32, "Avoid mixing debug/release CRT on Windows")
     def test_dh_params(self):
         # Check we can get a connection with ephemeral Diffie-Hellman
         client_context, server_context, hostname = testing_context()
@@ -4197,6 +4218,12 @@ class ThreadedTests(unittest.TestCase):
             server_result = stats['server_npn_protocols'][-1] \
                 if len(stats['server_npn_protocols']) else 'nothing'
             self.assertEqual(server_result, expected, msg % (server_result, "server"))
+
+    def test_empty_npn_protocols(self):
+        """npn_protocols cannot be empty, see CVE-2024-5642 & gh-121227"""
+        client_context, server_context, hostname = testing_context()
+        with self.assertRaises(ssl.SSLError):
+            server_context.set_npn_protocols([])
 
     def sni_contexts(self):
         server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -4680,6 +4707,7 @@ class TestSSLDebug(unittest.TestCase):
             return len(list(f))
 
     @requires_keylog
+    @unittest.skipIf(Py_DEBUG_WIN32, "Avoid mixing debug/release CRT on Windows")
     def test_keylog_defaults(self):
         self.addCleanup(support.unlink, support.TESTFN)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -4703,6 +4731,7 @@ class TestSSLDebug(unittest.TestCase):
             ctx.keylog_filename = 1
 
     @requires_keylog
+    @unittest.skipIf(Py_DEBUG_WIN32, "Avoid mixing debug/release CRT on Windows")
     def test_keylog_filename(self):
         self.addCleanup(support.unlink, support.TESTFN)
         client_context, server_context, hostname = testing_context()
@@ -4740,6 +4769,7 @@ class TestSSLDebug(unittest.TestCase):
     @requires_keylog
     @unittest.skipIf(sys.flags.ignore_environment,
                      "test is not compatible with ignore_environment")
+    @unittest.skipIf(Py_DEBUG_WIN32, "Avoid mixing debug/release CRT on Windows")
     def test_keylog_env(self):
         self.addCleanup(support.unlink, support.TESTFN)
         with unittest.mock.patch.dict(os.environ):
@@ -4838,7 +4868,7 @@ class TestPreHandshakeClose(unittest.TestCase):
             self.listener = None  # set by .start()
             self.port = None  # set by .start()
             if timeout is None:
-                self.timeout = SHORT_TIMEOUT
+                self.timeout = support.SHORT_TIMEOUT
             else:
                 self.timeout = timeout
             super().__init__(name=name)
@@ -4862,7 +4892,7 @@ class TestPreHandshakeClose(unittest.TestCase):
             self.ssl_ctx.load_verify_locations(cafile=ONLYCERT)
             self.ssl_ctx.load_cert_chain(certfile=ONLYCERT, keyfile=ONLYKEY)
             self.listener = socket.socket()
-            self.port = support.bind_port(self.listener)
+            self.port = socket_helper.bind_port(self.listener)
             self.listener.settimeout(self.timeout)
             self.listener.listen(1)
             super().start()
@@ -4920,7 +4950,7 @@ class TestPreHandshakeClose(unittest.TestCase):
 
         def call_after_accept(unused):
             server_accept_called.set()
-            if not ready_for_server_wrap_socket.wait(SHORT_TIMEOUT):
+            if not ready_for_server_wrap_socket.wait(support.SHORT_TIMEOUT):
                 raise RuntimeError("wrap_socket event never set, test may fail.")
             return False  # Tell the server thread to continue.
 
@@ -4964,7 +4994,7 @@ class TestPreHandshakeClose(unittest.TestCase):
         client_can_continue_with_wrap_socket = threading.Event()
 
         def call_after_accept(conn_to_client):
-            if not server_can_continue_with_wrap_socket.wait(SHORT_TIMEOUT):
+            if not server_can_continue_with_wrap_socket.wait(support.SHORT_TIMEOUT):
                 print("ERROR: test client took too long")
 
             # This forces an immediate connection close via RST on .close().
@@ -4990,7 +5020,7 @@ class TestPreHandshakeClose(unittest.TestCase):
             client.connect(server.listener.getsockname())
             server_can_continue_with_wrap_socket.set()
 
-            if not client_can_continue_with_wrap_socket.wait(SHORT_TIMEOUT):
+            if not client_can_continue_with_wrap_socket.wait(support.SHORT_TIMEOUT):
                 self.fail("test server took too long")
             ssl_ctx = ssl.create_default_context()
             try:
@@ -5029,7 +5059,7 @@ class TestPreHandshakeClose(unittest.TestCase):
                 http.client.HTTPConnection.connect(self)
 
                 # Wait for our fault injection server to have done its thing.
-                if not server_responding.wait(SHORT_TIMEOUT) and support.verbose:
+                if not server_responding.wait(support.SHORT_TIMEOUT) and support.verbose:
                     sys.stdout.write("server_responding event never set.")
                 self.sock = self._context.wrap_socket(
                         self.sock, server_hostname=self.host)
@@ -5073,7 +5103,7 @@ class TestPreHandshakeClose(unittest.TestCase):
         server.join()
 
 
-def test_main(verbose=False):
+def setUpModule():
     if support.verbose:
         plats = {
             'Mac': platform.mac_ver,
@@ -5104,20 +5134,9 @@ def test_main(verbose=False):
         if not os.path.exists(filename):
             raise support.TestFailed("Can't read certificate file %r" % filename)
 
-    tests = [
-        ContextTests, BasicSocketTests, SSLErrorTests, MemoryBIOTests,
-        SSLObjectTests, SimpleBackgroundTests, ThreadedTests,
-        TestPostHandshakeAuth, TestSSLDebug, TestPreHandshakeClose
-    ]
-
-    if support.is_resource_enabled('network'):
-        tests.append(NetworkedTests)
-
     thread_info = support.threading_setup()
-    try:
-        support.run_unittest(*tests)
-    finally:
-        support.threading_cleanup(*thread_info)
+    unittest.addModuleCleanup(support.threading_cleanup, *thread_info)
+
 
 if __name__ == "__main__":
-    test_main()
+    unittest.main()

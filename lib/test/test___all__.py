@@ -4,6 +4,13 @@ import os
 import sys
 
 
+if support.check_sanitizer(address=True, memory=True):
+    # bpo-46633: test___all__ is skipped because importing some modules
+    # directly can trigger known problems with ASAN (like tk or crypt).
+    raise unittest.SkipTest("workaround ASAN build issues on loading tests "
+                            "like tk or crypt")
+
+
 class NoAll(RuntimeError):
     pass
 
@@ -17,6 +24,7 @@ class AllTest(unittest.TestCase):
         names = {}
         with support.check_warnings(
             (".* (module|package)", DeprecationWarning),
+            (".* (module|package)", PendingDeprecationWarning),
             ("", ResourceWarning),
             quiet=True):
             try:
@@ -53,6 +61,12 @@ class AllTest(unittest.TestCase):
                 self.assertEqual(keys, all_set, "in module {}".format(modname))
 
     def walk_modules(self, basedir, modpath):
+        if modpath == 'distutils.':
+            # gh-135374: when setuptools is installed, it now replaces
+            # 'distutils' with its own version.
+            # In a security-fix only branch of CPython,
+            # skip the __all__ test rather than deal with the fallout.
+            return
         for fn in sorted(os.listdir(basedir)):
             path = os.path.join(basedir, fn)
             if os.path.isdir(path):
