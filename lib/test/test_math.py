@@ -1305,6 +1305,13 @@ class MathTests(unittest.TestCase):
             except ValueError:
                 pass
 
+        # https://github.com/IronLanguages/ironpython3/issues/1550
+        SKIP_ON_IRONPYTHON = set()
+        if sys.implementation.name == 'ironpython' and sys.platform == 'win32':
+            import clr
+            if clr.FrameworkDescription.startswith('.NET Framework'):
+                SKIP_ON_IRONPYTHON.add('tan0064')
+
         fail_fmt = "{}: {}({!r}): {}"
 
         failures = []
@@ -1319,6 +1326,9 @@ class MathTests(unittest.TestCase):
             if osx_version is not None and osx_version < (10, 5):
                 if id in SKIP_ON_TIGER:
                     continue
+
+            if id in SKIP_ON_IRONPYTHON:
+                continue
 
             func = getattr(math, fn)
 

@@ -19,7 +19,7 @@ class ListTest(list_tests.CommonTest):
         self.assertEqual(list(x for x in range(10) if x % 2),
                          [1, 3, 5, 7, 9])
 
-        if sys.maxsize == 0x7fffffff:
+        if sys.maxsize == 0x7fffffff and sys.implementation.name != "ironpython":
             # This test can currently only work on 32-bit machines.
             # XXX If/when PySequence_Length() returns a ssize_t, it should be
             # XXX re-enabled.

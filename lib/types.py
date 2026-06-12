@@ -53,7 +53,7 @@ except TypeError:
 
 # For Jython, the following two types are identical
 GetSetDescriptorType = type(FunctionType.__code__)
-MemberDescriptorType = type(FunctionType.__globals__)
+MemberDescriptorType = type(ModuleType.__dict__["__dict__"]) # ironpython: type(FunctionType.__globals__) is getset_descriptor
 
 del sys, _f, _g, _C, _c, _ag  # Not for export
 
@@ -253,6 +253,7 @@ def coroutine(func):
         # Check if 'func' is a generator function.
         # (0x20 == CO_GENERATOR)
         if co_flags & 0x20:
+            return func # ironpython: todo figure this out
             # TODO: Implement this in C.
             co = func.__code__
             func.__code__ = CodeType(

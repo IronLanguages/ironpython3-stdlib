@@ -84,6 +84,7 @@ class Template(metaclass=_TemplateMetaclass):
     # backward compatibility.  So we use the ?a local flag and [a-z] pattern.
     # See https://bugs.python.org/issue31672
     idpattern = r'(?a:[_a-z][_a-z0-9]*)'
+    idpattern = r'(?-i:[_a-zA-Z][_a-zA-Z0-9]*)' # ironpython: https://github.com/IronLanguages/ironpython3/issues/2066
     braceidpattern = None
     flags = _re.IGNORECASE
 

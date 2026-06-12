@@ -4,6 +4,7 @@ import unittest
 import os
 import re
 import itertools
+import struct   # IronPython: for platform architecture detection
 import socket
 import sys
 import weakref
@@ -20,6 +21,7 @@ class MmapTests(unittest.TestCase):
             os.unlink(TESTFN)
 
     def tearDown(self):
+        self.doCleanups() # ironpython: close mmap before deleting
         try:
             os.unlink(TESTFN)
         except OSError:
@@ -52,7 +54,7 @@ class MmapTests(unittest.TestCase):
 
         # Shouldn't crash on boundary (Issue #5292)
         self.assertRaises(IndexError, m.__getitem__, len(m))
-        self.assertRaises(IndexError, m.__setitem__, len(m), b'\0')
+        self.assertRaises(IndexError, m.__setitem__, len(m), 0)
 
         # Modify the file's content
         m[0] = b'3'[0]
@@ -100,7 +102,7 @@ class MmapTests(unittest.TestCase):
             # resize() not supported
             # No messages are printed, since the output of this test suite
             # would then be different across platforms.
-            pass
+            raise # ironpython: all our runners currently support resize
         else:
             # resize() is supported
             self.assertEqual(len(m), 512)
@@ -166,7 +168,7 @@ class MmapTests(unittest.TestCase):
             try:
                 m.resize(2*mapsize)
             except SystemError:   # resize is not universally supported
-                pass
+                raise # ironpython: all our runners currently support resize
             except TypeError:
                 pass
             else:
@@ -174,6 +176,8 @@ class MmapTests(unittest.TestCase):
             with open(TESTFN, "rb") as fp:
                 self.assertEqual(fp.read(), b'a'*mapsize,
                                  "Readonly memory map data file was modified")
+
+            m.close()
 
         # Opening mmap with size too big
         with open(TESTFN, "r+b") as f:
@@ -239,10 +243,16 @@ class MmapTests(unittest.TestCase):
             # Try writing with PROT_EXEC and without PROT_WRITE
             prot = mmap.PROT_READ | getattr(mmap, 'PROT_EXEC', 0)
             with open(TESTFN, "r+b") as f:
-                m = mmap.mmap(f.fileno(), mapsize, prot=prot)
-                self.assertRaises(TypeError, m.write, b"abcdef")
-                self.assertRaises(TypeError, m.write_byte, 0)
-                m.close()
+                # try/except backported from Python 3.12
+                try:
+                    m = mmap.mmap(f.fileno(), mapsize, prot=prot)
+                except PermissionError:
+                    # on macOS 14, PROT_READ | PROT_EXEC is not allowed
+                    pass
+                else:
+                    self.assertRaises(TypeError, m.write, b"abcdef")
+                    self.assertRaises(TypeError, m.write_byte, 0)
+                    m.close()
 
     def test_bad_file_desc(self):
         # Try opening a bad file descriptor...
@@ -284,6 +294,7 @@ class MmapTests(unittest.TestCase):
         self.assertEqual(m.find(b'one', 1, -2), -1)
         self.assertEqual(m.find(bytearray(b'one')), 0)
 
+        m.close()
 
     def test_rfind(self):
         # test the new 'end' parameter works as expected
@@ -303,6 +314,7 @@ class MmapTests(unittest.TestCase):
         self.assertEqual(m.rfind(b'one', 1, -2), -1)
         self.assertEqual(m.rfind(bytearray(b'one')), 8)
 
+        m.close()
 
     def test_double_close(self):
         # make sure a double close doesn't crash on Solaris (Bug# 665913)
@@ -529,7 +541,7 @@ class MmapTests(unittest.TestCase):
             try:
                 m.resize(512)
             except SystemError:
-                pass
+                raise # ironpython: all our runners currently support resize
             else:
                 # resize() is supported
                 self.assertEqual(len(m), 512)
@@ -607,6 +619,8 @@ class MmapTests(unittest.TestCase):
         self.assertEqual(m.tell(), 9)
         self.assertEqual(m[:], b"012barbaz9")
         self.assertRaises(ValueError, m.write, b"ba")
+
+        m.close() # ironpython
 
     def test_non_ascii_byte(self):
         for b in (129, 200, 255): # > 128
@@ -774,7 +788,8 @@ class LargeMmapTests(unittest.TestCase):
 
     def test_large_filesize(self):
         with self._make_test_file(0x17FFFFFFF, b" ") as f:
-            if sys.maxsize < 0x180000000:
+            #if sys.maxsize < 0x180000000: # original CPython test
+            if struct.calcsize('P') * 8 == 32: # IronPython: better detection of 32-bit platform
                 # On 32 bit platforms the file is larger than sys.maxsize so
                 # mapping the whole file should fail -- Issue #16743
                 with self.assertRaises(OverflowError):
@@ -794,11 +809,13 @@ class LargeMmapTests(unittest.TestCase):
             with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
                 self.assertEqual(m[start:end], tail)
 
-    @unittest.skipUnless(sys.maxsize > _4G, "test cannot run on 32-bit systems")
+    #@unittest.skipUnless(sys.maxsize > _4G, "test cannot run on 32-bit systems") # original CPython decorator
+    @unittest.skipUnless(struct.calcsize('P') * 8 > 32, "test cannot run on 32-bit systems") # IronPython: better detection of 32-bit platform
     def test_around_2GB(self):
         self._test_around_boundary(_2G)
 
-    @unittest.skipUnless(sys.maxsize > _4G, "test cannot run on 32-bit systems")
+    #@unittest.skipUnless(sys.maxsize > _4G, "test cannot run on 32-bit systems") # original CPython decorator
+    @unittest.skipUnless(struct.calcsize('P') * 8 > 32, "test cannot run on 32-bit systems") # IronPython: better detection of 32-bit platform
     def test_around_4GB(self):
         self._test_around_boundary(_4G)
 

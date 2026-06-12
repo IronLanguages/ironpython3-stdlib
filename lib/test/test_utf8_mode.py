@@ -20,6 +20,7 @@ class UTF8ModeTests(unittest.TestCase):
         'PYTHONUTF8': '',
         'PYTHONLEGACYWINDOWSFSENCODING': '',
         'PYTHONCOERCECLOCALE': '0',
+        '__isolated': False, # https://github.com/IronLanguages/ironpython3/issues/1440
     }
 
     def posix_locale(self):
@@ -58,7 +59,7 @@ class UTF8ModeTests(unittest.TestCase):
         out = self.get_output('-X', 'utf8=0', '-c', code)
         self.assertEqual(out, '0')
 
-        if MS_WINDOWS:
+        if MS_WINDOWS and sys.implementation.name != "ironpython": # https://github.com/IronLanguages/ironpython3/issues/1156
             # PYTHONLEGACYWINDOWSFSENCODING disables the UTF-8 Mode
             # and has the priority over -X utf8
             out = self.get_output('-X', 'utf8', '-c', code,
@@ -78,7 +79,7 @@ class UTF8ModeTests(unittest.TestCase):
         out = self.get_output('-X', 'utf8=0', '-c', code, PYTHONUTF8='1')
         self.assertEqual(out, '0')
 
-        if MS_WINDOWS:
+        if MS_WINDOWS and sys.implementation.name != "ironpython": # https://github.com/IronLanguages/ironpython3/issues/1156
             # PYTHONLEGACYWINDOWSFSENCODING disables the UTF-8 mode
             # and has the priority over PYTHONUTF8
             out = self.get_output('-X', 'utf8', '-c', code, PYTHONUTF8='1',
@@ -112,7 +113,7 @@ class UTF8ModeTests(unittest.TestCase):
         out = self.get_output('-X', 'utf8', '-c', code)
         self.assertEqual(out, expected)
 
-        if MS_WINDOWS:
+        if MS_WINDOWS and sys.implementation.name != "ironpython": # https://github.com/IronLanguages/ironpython3/issues/1156
             # PYTHONLEGACYWINDOWSFSENCODING disables the UTF-8 mode
             # and has the priority over -X utf8 and PYTHONUTF8
             out = self.get_output('-X', 'utf8', '-c', code,
@@ -159,7 +160,7 @@ class UTF8ModeTests(unittest.TestCase):
         ''')
         filename = __file__
 
-        out = self.get_output('-c', code, filename, PYTHONUTF8='1')
+        out = self.get_output('-X', 'utf8', '-c', code, filename)
         self.assertEqual(out, 'UTF-8/strict')
 
     def _check_io_encoding(self, module, encoding=None, errors=None):
@@ -178,8 +179,7 @@ class UTF8ModeTests(unittest.TestCase):
             with open(filename, %s) as fp:
                 print(f"{fp.encoding}/{fp.errors}")
         ''') % (module, ', '.join(args))
-        out = self.get_output('-c', code, filename,
-                              PYTHONUTF8='1')
+        out = self.get_output('-X', 'utf8', '-c', code, filename)
 
         if not encoding:
             encoding = 'UTF-8'

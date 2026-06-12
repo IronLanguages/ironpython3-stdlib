@@ -33,6 +33,45 @@ try:
 except ImportError:
     fcntl = None
 
+# ironpython: backported shims for older python
+try:
+    from test.support import os_helper
+except ImportError:
+    class os_helper:
+        make_bad_fd = support.make_bad_fd
+        unlink = support.unlink
+
+try:
+    from test.support import socket_helper
+except ImportError:
+    class socket_helper:
+        HOST = "localhost"
+        HOSTv6 = "::1"
+
+        @staticmethod
+        def create_unix_domain_name():
+            """
+            Create a UNIX domain name: socket.bind() argument of a AF_UNIX socket.
+            Return a path relative to the current directory to get a short path
+            (around 27 ASCII characters).
+            """
+            return tempfile.mktemp(prefix="test_python_", suffix='.sock',
+                                   dir=os.path.curdir)
+
+        IPV6_ENABLED = False
+
+    if socket.has_ipv6:
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            sock.bind((socket_helper.HOSTv6, 0))
+            socket_helper.IPV6_ENABLED = True
+        except OSError:
+            pass
+        finally:
+            if sock:
+                sock.close()
+
 HOST = support.HOST
 MSG = 'Michael Gilfix was here\u1234\r\n'.encode('utf-8') ## test unicode string and carriage return
 MAIN_TIMEOUT = 60.0
@@ -786,6 +825,7 @@ class GeneralModuleTests(unittest.TestCase):
         self.assertEqual(p.fileno(), s.fileno())
         s.close()
         s = None
+        support.gc_collect() # required for IronPython
         try:
             p.fileno()
         except ReferenceError:
@@ -813,11 +853,11 @@ class GeneralModuleTests(unittest.TestCase):
         with self.assertRaises(TypeError) as cm:
             s.sendto('\u2620', sockname)
         self.assertEqual(str(cm.exception),
-                         "a bytes-like object is required, not 'str'")
+                         "expected bytes, got str" if sys.implementation.name == "ironpython" else "a bytes-like object is required, not 'str'")
         with self.assertRaises(TypeError) as cm:
             s.sendto(5j, sockname)
         self.assertEqual(str(cm.exception),
-                         "a bytes-like object is required, not 'complex'")
+                         "expected bytes, got str" if sys.implementation.name == "ironpython" else "a bytes-like object is required, not 'complex'")
         with self.assertRaises(TypeError) as cm:
             s.sendto(b'foo', None)
         self.assertIn('not NoneType',str(cm.exception))
@@ -1426,7 +1466,8 @@ class GeneralModuleTests(unittest.TestCase):
                                flags=socket.AI_PASSIVE)
         self.assertEqual(a, b)
         # Issue #6697.
-        self.assertRaises(UnicodeEncodeError, socket.getaddrinfo, 'localhost', '\uD800')
+        if sys.implementation.name != 'ironpython':
+            self.assertRaises(UnicodeEncodeError, socket.getaddrinfo, 'localhost', '\uD800')
 
         # Issue 17269: test workaround for OS X platform bug segfault
         if hasattr(socket, 'AI_NUMERICSERV'):
@@ -1732,6 +1773,7 @@ class GeneralModuleTests(unittest.TestCase):
             with self.assertRaises(TypeError):
                 sock._sendfile_use_sendfile(File(None))
 
+    # ironpython: test_socket_fileno tests are backported from py3.11
     def _test_socket_fileno(self, s, family, stype):
         self.assertEqual(s.family, family)
         self.assertEqual(s.type, stype)
@@ -1748,28 +1790,76 @@ class GeneralModuleTests(unittest.TestCase):
     def test_socket_fileno(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.addCleanup(s.close)
-        s.bind((support.HOST, 0))
+        s.bind((socket_helper.HOST, 0))
         self._test_socket_fileno(s, socket.AF_INET, socket.SOCK_STREAM)
 
         if hasattr(socket, "SOCK_DGRAM"):
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.addCleanup(s.close)
-            s.bind((support.HOST, 0))
+            s.bind((socket_helper.HOST, 0))
             self._test_socket_fileno(s, socket.AF_INET, socket.SOCK_DGRAM)
 
-        if support.IPV6_ENABLED:
+        if socket_helper.IPV6_ENABLED:
             s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
             self.addCleanup(s.close)
-            s.bind((support.HOSTv6, 0, 0, 0))
+            s.bind((socket_helper.HOSTv6, 0, 0, 0))
             self._test_socket_fileno(s, socket.AF_INET6, socket.SOCK_STREAM)
 
         if hasattr(socket, "AF_UNIX"):
-            tmpdir = tempfile.mkdtemp()
-            self.addCleanup(shutil.rmtree, tmpdir)
+            unix_name = socket_helper.create_unix_domain_name()
+            self.addCleanup(os_helper.unlink, unix_name)
+
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.addCleanup(s.close)
-            s.bind(os.path.join(tmpdir, 'socket'))
-            self._test_socket_fileno(s, socket.AF_UNIX, socket.SOCK_STREAM)
+            with s:
+                try:
+                    s.bind(unix_name)
+                except PermissionError:
+                    pass
+                else:
+                    self._test_socket_fileno(s, socket.AF_UNIX,
+                                             socket.SOCK_STREAM)
+
+    def test_socket_fileno_rejects_float(self):
+        with self.assertRaises(TypeError):
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM, fileno=42.5)
+
+    def test_socket_fileno_rejects_other_types(self):
+        with self.assertRaises(TypeError):
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM, fileno="foo")
+
+    def test_socket_fileno_rejects_invalid_socket(self):
+        with self.assertRaisesRegex(ValueError, "negative file descriptor"):
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM, fileno=-1)
+
+    @unittest.skipIf(os.name == "nt", "Windows disallows -1 only")
+    def test_socket_fileno_rejects_negative(self):
+        with self.assertRaisesRegex(ValueError, "negative file descriptor"):
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM, fileno=-42)
+
+    def test_socket_fileno_requires_valid_fd(self):
+        WSAENOTSOCK = 10038
+        with self.assertRaises(OSError) as cm:
+            socket.socket(fileno=os_helper.make_bad_fd())
+        self.assertIn(cm.exception.errno, (errno.EBADF, WSAENOTSOCK))
+
+        with self.assertRaises(OSError) as cm:
+            socket.socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                fileno=os_helper.make_bad_fd())
+        self.assertIn(cm.exception.errno, (errno.EBADF, WSAENOTSOCK))
+
+    def test_socket_fileno_requires_socket_fd(self):
+        with tempfile.NamedTemporaryFile() as afile:
+            with self.assertRaises(OSError):
+                socket.socket(fileno=afile.fileno())
+
+            with self.assertRaises(OSError) as cm:
+                socket.socket(
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    fileno=afile.fileno())
+            self.assertEqual(cm.exception.errno, errno.ENOTSOCK)
 
 
 @unittest.skipUnless(HAVE_SOCKET_CAN, 'SocketCan required for this test.')
@@ -4556,6 +4646,8 @@ class UnbufferedFileObjectClassTestCase(FileObjectClassTestCase):
         self.write_file.write(self.write_msg)
         self.write_file.flush()
 
+    @unittest.skipUnless(hasattr(sys, 'getrefcount'),
+                         'test needs sys.getrefcount()')
     def testMakefileCloseSocketDestroy(self):
         refcount_before = sys.getrefcount(self.cli_conn)
         self.read_file.close()
@@ -4937,6 +5029,7 @@ class TestExceptions(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform == 'linux', 'Linux specific test')
+@unittest.skipUnless(hasattr(socket, 'AF_UNIX'), 'test needs socket.AF_UNIX')
 class TestLinuxAbstractNamespace(unittest.TestCase):
 
     UNIX_PATH_MAX = 108
@@ -5981,7 +6074,9 @@ class TestMSWindowsTCPFlags(unittest.TestCase):
         self.assertEqual([], unknown,
             "New TCP flags were discovered. See bpo-32394 for more information")
 
-def test_main():
+
+# ironpython: refactored to use load_tests protocol
+def load_tests(*args):
     tests = [GeneralModuleTests, BasicTCPTest, TCPCloserTest, TCPTimeoutTest,
              TestExceptions, BufferIOTest, BasicTCPTest2, BasicUDPTest, UDPTimeoutTest ]
 
@@ -6042,8 +6137,11 @@ def test_main():
     ])
     tests.append(TestMSWindowsTCPFlags)
 
+    return unittest.TestSuite([unittest.makeSuite(test) for test in tests])
+
+def test_main():
     thread_info = support.threading_setup()
-    support.run_unittest(*tests)
+    support.run_unittest(__name__)
     support.threading_cleanup(*thread_info)
 
 if __name__ == "__main__":

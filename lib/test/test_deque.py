@@ -881,6 +881,7 @@ class TestSubclass(unittest.TestCase):
         p = weakref.proxy(d)
         self.assertEqual(str(p), str(d))
         d = None
+        gc.collect() # required by IronPython
         self.assertRaises(ReferenceError, str, p)
 
     def test_strange_subclass(self):

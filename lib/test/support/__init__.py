@@ -2128,7 +2128,16 @@ environment_altered = False
 # __bootstrap() method has returned, which gives us reliable reference counts
 # at the end of a test run.
 
+if sys.implementation.name == "ironpython":
+    # disable reap_threads on Mono due to https://github.com/IronLanguages/ironpython3/issues/1005
+    import clr
+    if clr.IsMono:
+        _thread = None
+
 def threading_setup():
+    if _thread is None:
+        return 1, ()
+    threading.current_thread() # ironpython: register the current thread if not running on a known thread
     return _thread._count(), threading._dangling.copy()
 
 def threading_cleanup(*original_values):
@@ -2833,13 +2842,23 @@ def disable_faulthandler():
 def fd_count():
     """Count the number of open file descriptors.
     """
-    if sys.platform.startswith(('linux', 'freebsd')):
+    # ironpython: backported from Python 3.12
+    if sys.platform.startswith(('linux', 'freebsd', 'emscripten')):
+        fd_path = "/proc/self/fd"
+    elif sys.platform == "darwin":
+        fd_path = "/dev/fd"
+    else:
+        fd_path = None
+
+    if fd_path is not None:
         try:
-            names = os.listdir("/proc/self/fd")
+            names = os.listdir(fd_path)
             # Subtract one because listdir() internally opens a file
-            # descriptor to list the content of the /proc/self/fd/ directory.
+            # descriptor to list the content of the directory.
             return len(names) - 1
         except FileNotFoundError:
+            pass
+        except PermissionError: # ironpython: bug in .NET 6 on macOS
             pass
 
     MAXFD = 256

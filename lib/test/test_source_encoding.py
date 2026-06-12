@@ -12,11 +12,11 @@ class MiscSourceEncodingTest(unittest.TestCase):
 
     def test_pep263(self):
         self.assertEqual(
-            "…‘œŒ".encode("utf-8"),
+            "√∞√â√î√è√é".encode("utf-8"),
             b'\xd0\x9f\xd0\xb8\xd1\x82\xd0\xbe\xd0\xbd'
         )
         self.assertEqual(
-            "\".encode("utf-8"),
+            "\√∞".encode("utf-8"),
             b'\\\xd0\x9f'
         )
 
@@ -137,8 +137,12 @@ class MiscSourceEncodingTest(unittest.TestCase):
         input = "# coding: ascii\n\N{SNOWMAN}".encode('utf-8')
         with self.assertRaises(SyntaxError) as c:
             compile(input, "<string>", "exec")
-        expected = "'ascii' codec can't decode byte 0xe2 in position 16: " \
-                   "ordinal not in range(128)"
+        if sys.implementation.name == 'ironpython':
+            expected = "'ascii' codec can't decode byte 0xe2 in position 16: " \
+                       "Unable to translate bytes"
+        else:
+            expected = "'ascii' codec can't decode byte 0xe2 in position 16: " \
+                       "ordinal not in range(128)"
         self.assertTrue(c.exception.args[0].startswith(expected),
                         msg=c.exception.args[0])
 

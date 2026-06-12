@@ -10,6 +10,7 @@ import warnings
 import collections
 import collections.abc
 import itertools
+import sys
 
 class PassThru(Exception):
     pass
@@ -606,6 +607,7 @@ class TestSet(TestJointOps, unittest.TestCase):
         p = weakref.proxy(s)
         self.assertEqual(str(p), str(s))
         s = None
+        gc.collect() # required by IronPython
         self.assertRaises(ReferenceError, str, p)
 
     def test_rich_compare(self):
@@ -1783,7 +1785,12 @@ class TestWeirdBugs(unittest.TestCase):
         s.clear()
         a = list(range(100))
         s.update(range(100))
-        list(si)
+        if sys.implementation.name == "ironpython":
+            # https://github.com/IronLanguages/ironpython3/issues/847
+            with self.assertRaises(RuntimeError):
+                list(si)
+        else:
+            list(si)
 
     def test_merge_and_mutate(self):
         class X:
