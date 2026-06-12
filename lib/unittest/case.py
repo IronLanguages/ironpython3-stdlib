@@ -203,11 +203,16 @@ class _AssertRaisesContext(_AssertRaisesBaseContext):
                 self._raiseFailure("{} not raised".format(exc_name))
         else:
             traceback.clear_frames(tb)
-        if not issubclass(exc_type, self.expected):
+
+        if issubclass(exc_type, self.expected):
+            # store exception, without traceback, for later retrieval
+            self.exception = exc_value.with_traceback(None)
+        elif (hasattr(exc_value, 'clsException') and isinstance(exc_value.clsException, self.expected)):
+            # IronPython: allow .NET exceptions
+            self.exception = exc_value.clsException
+        else:
             # let unexpected exceptions pass through
             return False
-        # store exception, without traceback, for later retrieval
-        self.exception = exc_value.with_traceback(None)
         if self.expected_regex is None:
             return True
 
@@ -217,6 +222,9 @@ class _AssertRaisesContext(_AssertRaisesBaseContext):
                      expected_regex.pattern, str(exc_value)))
         return True
 
+if sys.implementation.name == "ironpython":
+    import System
+    _AssertRaisesContext._base_type = (_AssertRaisesContext._base_type, System.Exception)
 
 class _AssertWarnsContext(_AssertRaisesBaseContext):
     """A context manager used to implement TestCase.assertWarns* methods."""

@@ -2,6 +2,7 @@ import abc
 import builtins
 import collections
 import copy
+import gc
 from itertools import permutations
 import pickle
 from random import choice
@@ -159,6 +160,7 @@ class TestPartial:
         p = proxy(f)
         self.assertEqual(f.func, p.func)
         f = None
+        gc.collect() # required by IronPython
         self.assertRaises(ReferenceError, getattr, p, 'func')
 
     def test_with_bound_and_unbound_methods(self):
@@ -1695,7 +1697,7 @@ class TestSingleDispatch(unittest.TestCase):
         c.MutableSequence.register(D)
         bases = [c.MutableSequence, c.MutableMapping]
         for haystack in permutations(bases):
-            m = mro(D, bases)
+            m = mro(D, haystack)
             self.assertEqual(m, [D, c.MutableSequence, c.Sequence, c.Reversible,
                                  c.defaultdict, dict, c.MutableMapping, c.Mapping,
                                  c.Collection, c.Sized, c.Iterable, c.Container,

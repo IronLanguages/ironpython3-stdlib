@@ -1026,6 +1026,7 @@ class BaseTest:
         p = weakref.proxy(s)
         self.assertEqual(p.tobytes(), s.tobytes())
         s = None
+        import gc; gc.collect() # ironpython requires a GC to release the reference
         self.assertRaises(ReferenceError, len, p)
 
     @unittest.skipUnless(hasattr(sys, 'getrefcount'),

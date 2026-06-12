@@ -51,7 +51,10 @@ class GeneralFloatCases(unittest.TestCase):
         self.assertRaises(TypeError, float, {})
         self.assertRaisesRegex(TypeError, "not 'dict'", float, {})
         # Lone surrogate
-        self.assertRaises(UnicodeEncodeError, float, '\uD8F0')
+        if sys.version_info >= (3,7) or sys.implementation.name == 'ironpython':
+            self.assertRaises(ValueError, float, '\uD8F0')
+        else:
+            self.assertRaises(UnicodeEncodeError, float, '\uD8F0')
         # check that we don't accept alternate exponent markers
         self.assertRaises(ValueError, float, "-1.7d29")
         self.assertRaises(ValueError, float, "3D-14")
@@ -617,6 +620,7 @@ class IEEEFormatTestCase(unittest.TestCase):
             struct.unpack(fmt, data)
 
     @support.requires_IEEE_754
+    @support.cpython_only
     def test_serialized_float_rounding(self):
         from _testcapi import FLT_MAX
         self.assertEqual(struct.pack("<f", 3.40282356e38), struct.pack("<f", FLT_MAX))

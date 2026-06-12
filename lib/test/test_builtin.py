@@ -288,7 +288,7 @@ class BuiltinTest(unittest.TestCase):
         self.assertEqual(chr(0xff), '\xff')
         self.assertRaises(ValueError, chr, 1<<24)
         self.assertEqual(chr(sys.maxunicode),
-                         str('\\U0010ffff'.encode("ascii"), 'unicode-escape'))
+                         str(('\\U%08x' % (sys.maxunicode)).encode("ascii"), 'unicode-escape')) # ironpython: sys.maxunicode is still 0xffff
         self.assertRaises(TypeError, chr)
         self.assertEqual(chr(0x0000FFFF), "\U0000FFFF")
         self.assertEqual(chr(0x00010000), "\U00010000")
@@ -1008,6 +1008,7 @@ class BuiltinTest(unittest.TestCase):
         self.assertRaises(ValueError, open, 'a\x00b')
         self.assertRaises(ValueError, open, b'a\x00b')
 
+    @unittest.skipIf(sys.flags.utf8_mode, "utf-8 mode is enabled")
     def test_open_default_encoding(self):
         old_environ = dict(os.environ)
         try:
