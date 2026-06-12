@@ -14,16 +14,21 @@ import re
 import base64
 import ntpath
 import shutil
-import urllib.parse
+import email.message
+import email.utils
 import html
 import http.client
+import urllib.parse
 import tempfile
 import time
-from io import BytesIO
+import datetime
+import threading
+from unittest import mock
+from io import BytesIO, StringIO
 
 import unittest
 from test import support
-threading = support.import_module('threading')
+
 
 class NoLogRequestHandler:
     def log_message(self, *args):
@@ -324,7 +329,7 @@ class SimpleHTTPServerTestCase(BaseTestCase):
         pass
 
     def setUp(self):
-        BaseTestCase.setUp(self)
+        super().setUp()
         self.cwd = os.getcwd()
         basetempdir = tempfile.gettempdir()
         os.chdir(basetempdir)
@@ -332,8 +337,17 @@ class SimpleHTTPServerTestCase(BaseTestCase):
         self.tempdir = tempfile.mkdtemp(dir=basetempdir)
         self.tempdir_name = os.path.basename(self.tempdir)
         self.base_url = '/' + self.tempdir_name
-        with open(os.path.join(self.tempdir, 'test'), 'wb') as temp:
+        tempname = os.path.join(self.tempdir, 'test')
+        with open(tempname, 'wb') as temp:
             temp.write(self.data)
+            temp.flush()
+        mtime = os.stat(tempname).st_mtime
+        # compute last modification datetime for browser cache tests
+        last_modif = datetime.datetime.fromtimestamp(mtime,
+            datetime.timezone.utc)
+        self.last_modif_datetime = last_modif.replace(microsecond=0)
+        self.last_modif_header = email.utils.formatdate(
+            last_modif.timestamp(), usegmt=True)
 
     def tearDown(self):
         try:
@@ -343,7 +357,7 @@ class SimpleHTTPServerTestCase(BaseTestCase):
             except:
                 pass
         finally:
-            BaseTestCase.tearDown(self)
+            super().tearDown()
 
     def check_status_and_reason(self, response, status, data=None):
         def close_conn():
@@ -399,6 +413,63 @@ class SimpleHTTPServerTestCase(BaseTestCase):
         self.check_status_and_reason(response, HTTPStatus.OK,
                                      data=support.TESTFN_UNDECODABLE)
 
+    def test_undecodable_parameter(self):
+        # sanity check using a valid parameter
+        response = self.request(self.base_url + '/?x=123').read()
+        self.assertRegex(response, f'listing for {self.base_url}/\?x=123'.encode('latin1'))
+        # now the bogus encoding
+        response = self.request(self.base_url + '/?x=%bb').read()
+        self.assertRegex(response, f'listing for {self.base_url}/\?x=\xef\xbf\xbd'.encode('latin1'))
+
+    def test_get_dir_redirect_location_domain_injection_bug(self):
+        """Ensure //evil.co/..%2f../../X does not put //evil.co/ in Location.
+
+        //netloc/ in a Location header is a redirect to a new host.
+        https://github.com/python/cpython/issues/87389
+
+        This checks that a path resolving to a directory on our server cannot
+        resolve into a redirect to another server.
+        """
+        os.mkdir(os.path.join(self.tempdir, 'existing_directory'))
+        url = f'/python.org/..%2f..%2f..%2f..%2f..%2f../%0a%0d/../{self.tempdir_name}/existing_directory'
+        expected_location = f'{url}/'  # /python.org.../ single slash single prefix, trailing slash
+        # Canonicalizes to /tmp/tempdir_name/existing_directory which does
+        # exist and is a dir, triggering the 301 redirect logic.
+        response = self.request(url)
+        self.check_status_and_reason(response, HTTPStatus.MOVED_PERMANENTLY)
+        location = response.getheader('Location')
+        self.assertEqual(location, expected_location, msg='non-attack failed!')
+
+        # //python.org... multi-slash prefix, no trailing slash
+        attack_url = f'/{url}'
+        response = self.request(attack_url)
+        self.check_status_and_reason(response, HTTPStatus.MOVED_PERMANENTLY)
+        location = response.getheader('Location')
+        self.assertFalse(location.startswith('//'), msg=location)
+        self.assertEqual(location, expected_location,
+                msg='Expected Location header to start with a single / and '
+                'end with a / as this is a directory redirect.')
+
+        # ///python.org... triple-slash prefix, no trailing slash
+        attack3_url = f'//{url}'
+        response = self.request(attack3_url)
+        self.check_status_and_reason(response, HTTPStatus.MOVED_PERMANENTLY)
+        self.assertEqual(response.getheader('Location'), expected_location)
+
+        # If the second word in the http request (Request-URI for the http
+        # method) is a full URI, we don't worry about it, as that'll be parsed
+        # and reassembled as a full URI within BaseHTTPRequestHandler.send_head
+        # so no errant scheme-less //netloc//evil.co/ domain mixup can happen.
+        attack_scheme_netloc_2slash_url = f'https://pypi.org/{url}'
+        expected_scheme_netloc_location = f'{attack_scheme_netloc_2slash_url}/'
+        response = self.request(attack_scheme_netloc_2slash_url)
+        self.check_status_and_reason(response, HTTPStatus.MOVED_PERMANENTLY)
+        location = response.getheader('Location')
+        # We're just ensuring that the scheme and domain make it through, if
+        # there are or aren't multiple slashes at the start of the path that
+        # follows that isn't important in this Location: header.
+        self.assertTrue(location.startswith('https://pypi.org/'), msg=location)
+
     def test_get(self):
         #constructs the path relative to the root directory of the HTTPServer
         response = self.request(self.base_url + '/test')
@@ -446,6 +517,44 @@ class SimpleHTTPServerTestCase(BaseTestCase):
         self.assertEqual(response.getheader('content-type'),
                          'application/octet-stream')
 
+    def test_browser_cache(self):
+        """Check that when a request to /test is sent with the request header
+        If-Modified-Since set to date of last modification, the server returns
+        status code 304, not 200
+        """
+        headers = email.message.Message()
+        headers['If-Modified-Since'] = self.last_modif_header
+        response = self.request(self.base_url + '/test', headers=headers)
+        self.check_status_and_reason(response, HTTPStatus.NOT_MODIFIED)
+
+        # one hour after last modification : must return 304
+        new_dt = self.last_modif_datetime + datetime.timedelta(hours=1)
+        headers = email.message.Message()
+        headers['If-Modified-Since'] = email.utils.format_datetime(new_dt,
+            usegmt=True)
+        response = self.request(self.base_url + '/test', headers=headers)
+        self.check_status_and_reason(response, HTTPStatus.NOT_MODIFIED)
+
+    def test_browser_cache_file_changed(self):
+        # with If-Modified-Since earlier than Last-Modified, must return 200
+        dt = self.last_modif_datetime
+        # build datetime object : 365 days before last modification
+        old_dt = dt - datetime.timedelta(days=365)
+        headers = email.message.Message()
+        headers['If-Modified-Since'] = email.utils.format_datetime(old_dt,
+            usegmt=True)
+        response = self.request(self.base_url + '/test', headers=headers)
+        self.check_status_and_reason(response, HTTPStatus.OK)
+
+    def test_browser_cache_with_If_None_Match_header(self):
+        # if If-None-Match header is present, ignore If-Modified-Since
+
+        headers = email.message.Message()
+        headers['If-Modified-Since'] = self.last_modif_header
+        headers['If-None-Match'] = "*"
+        response = self.request(self.base_url + '/test', headers=headers)
+        self.check_status_and_reason(response, HTTPStatus.OK)
+
     def test_invalid_requests(self):
         response = self.request('/', method='FOO')
         self.check_status_and_reason(response, HTTPStatus.NOT_IMPLEMENTED)
@@ -454,6 +563,15 @@ class SimpleHTTPServerTestCase(BaseTestCase):
         self.check_status_and_reason(response, HTTPStatus.NOT_IMPLEMENTED)
         response = self.request('/', method='GETs')
         self.check_status_and_reason(response, HTTPStatus.NOT_IMPLEMENTED)
+
+    def test_last_modified(self):
+        """Checks that the datetime returned in Last-Modified response header
+        is the actual datetime of last modification, rounded to the second
+        """
+        response = self.request(self.base_url + '/test')
+        self.check_status_and_reason(response, HTTPStatus.OK, data=self.data)
+        last_modif_header = response.headers['Last-modified']
+        self.assertEqual(last_modif_header, self.last_modif_header)
 
     def test_path_without_leading_slash(self):
         response = self.request(self.tempdir_name + '/test')
@@ -727,7 +845,11 @@ class CGIHTTPServerTestCase(BaseTestCase):
 
 
 class SocketlessRequestHandler(SimpleHTTPRequestHandler):
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
+        request = mock.Mock()
+        request.makefile.return_value = BytesIO()
+        super().__init__(request, None, None)
+
         self.get_called = False
         self.protocol_version = "HTTP/1.1"
 
@@ -794,6 +916,25 @@ class BaseHTTPRequestHandlerTestCase(unittest.TestCase):
         match = self.HTTPResponseMatch.search(response)
         self.assertIsNotNone(match)
 
+    def test_unprintable_not_logged(self):
+        # We call the method from the class directly as our Socketless
+        # Handler subclass overrode it... nice for everything BUT this test.
+        self.handler.client_address = ('127.0.0.1', 1337)
+        log_message = BaseHTTPRequestHandler.log_message
+        with mock.patch.object(sys, 'stderr', StringIO()) as fake_stderr:
+            log_message(self.handler, '/foo')
+            log_message(self.handler, '/\033bar\000\033')
+            log_message(self.handler, '/spam %s.', 'a')
+            log_message(self.handler, '/spam %s.', '\033\x7f\x9f\xa0beans')
+        stderr = fake_stderr.getvalue()
+        self.assertNotIn('\033', stderr)  # non-printable chars are caught.
+        self.assertNotIn('\000', stderr)  # non-printable chars are caught.
+        lines = stderr.splitlines()
+        self.assertIn('/foo', lines[0])
+        self.assertIn(r'/\x1bbar\x00\x1b', lines[1])
+        self.assertIn('/spam a.', lines[2])
+        self.assertIn('/spam \\x1b\\x7f\\x9f\xa0beans.', lines[3])
+
     def test_http_1_1(self):
         result = self.send_typical_request(b'GET / HTTP/1.1\r\n\r\n')
         self.verify_http_server_response(result[0])
@@ -823,6 +964,16 @@ class BaseHTTPRequestHandlerTestCase(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0], b'<html><body>Data</body></html>\r\n')
         self.verify_get_called()
+
+    def test_extra_space(self):
+        result = self.send_typical_request(
+            b'GET /spaced out HTTP/1.1\r\n'
+            b'Host: dummy\r\n'
+            b'\r\n'
+        )
+        self.assertTrue(result[0].startswith(b'HTTP/1.1 400 '))
+        self.verify_expected_headers(result[1:result.index(b'\r\n')])
+        self.assertFalse(self.handler.get_called)
 
     def test_with_continue_1_0(self):
         result = self.send_typical_request(b'GET / HTTP/1.0\r\nExpect: 100-continue\r\n\r\n')

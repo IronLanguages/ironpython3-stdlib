@@ -1,85 +1,102 @@
-import unittest, test.support
+from test import support
 from test.support.script_helper import assert_python_ok, assert_python_failure
-import sys, io, os
-import struct
-import subprocess
-import textwrap
-import warnings
-import operator
+import builtins
 import codecs
 import gc
-import sysconfig
-import platform
 import locale
+import operator
+import os
+import struct
+import subprocess
+import sys
+import sysconfig
+import test.support
+import textwrap
+import unittest
+import warnings
+
 
 # count the number of test runs, used to create unique
 # strings to intern in test_intern()
-numruns = 0
+INTERN_NUMRUNS = 0
 
-try:
-    import threading
-except ImportError:
-    threading = None
 
-class SysModuleTest(unittest.TestCase):
-
-    def setUp(self):
-        self.orig_stdout = sys.stdout
-        self.orig_stderr = sys.stderr
-        self.orig_displayhook = sys.displayhook
-
-    def tearDown(self):
-        sys.stdout = self.orig_stdout
-        sys.stderr = self.orig_stderr
-        sys.displayhook = self.orig_displayhook
-        test.support.reap_children()
+class DisplayHookTest(unittest.TestCase):
 
     def test_original_displayhook(self):
-        import builtins
-        out = io.StringIO()
-        sys.stdout = out
-
         dh = sys.__displayhook__
 
-        self.assertRaises(TypeError, dh)
-        if hasattr(builtins, "_"):
-            del builtins._
+        with support.captured_stdout() as out:
+            dh(42)
 
-        dh(None)
-        self.assertEqual(out.getvalue(), "")
-        self.assertTrue(not hasattr(builtins, "_"))
-        dh(42)
         self.assertEqual(out.getvalue(), "42\n")
         self.assertEqual(builtins._, 42)
 
-        del sys.stdout
-        self.assertRaises(RuntimeError, dh, 42)
+        del builtins._
+
+        with support.captured_stdout() as out:
+            dh(None)
+
+        self.assertEqual(out.getvalue(), "")
+        self.assertTrue(not hasattr(builtins, "_"))
+
+        # sys.displayhook() requires arguments
+        self.assertRaises(TypeError, dh)
+
+        stdout = sys.stdout
+        try:
+            del sys.stdout
+            self.assertRaises(RuntimeError, dh, 42)
+        finally:
+            sys.stdout = stdout
 
     def test_lost_displayhook(self):
-        del sys.displayhook
-        code = compile("42", "<string>", "single")
-        self.assertRaises(RuntimeError, eval, code)
+        displayhook = sys.displayhook
+        try:
+            del sys.displayhook
+            code = compile("42", "<string>", "single")
+            self.assertRaises(RuntimeError, eval, code)
+        finally:
+            sys.displayhook = displayhook
 
     def test_custom_displayhook(self):
         def baddisplayhook(obj):
             raise ValueError
-        sys.displayhook = baddisplayhook
-        code = compile("42", "<string>", "single")
-        self.assertRaises(ValueError, eval, code)
+
+        with support.swap_attr(sys, 'displayhook', baddisplayhook):
+            code = compile("42", "<string>", "single")
+            self.assertRaises(ValueError, eval, code)
+
+
+class ExceptHookTest(unittest.TestCase):
 
     def test_original_excepthook(self):
-        err = io.StringIO()
-        sys.stderr = err
-
-        eh = sys.__excepthook__
-
-        self.assertRaises(TypeError, eh)
         try:
             raise ValueError(42)
         except ValueError as exc:
-            eh(*sys.exc_info())
+            with support.captured_stderr() as err:
+                sys.__excepthook__(*sys.exc_info())
 
         self.assertTrue(err.getvalue().endswith("ValueError: 42\n"))
+
+        self.assertRaises(TypeError, sys.__excepthook__)
+
+    def test_excepthook_bytes_filename(self):
+        # bpo-37467: sys.excepthook() must not crash if a filename
+        # is a bytes string
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', BytesWarning)
+
+            try:
+                raise SyntaxError("msg", (b"bytes_filename", 123, 0, "text"))
+            except SyntaxError as exc:
+                with support.captured_stderr() as err:
+                    sys.__excepthook__(*sys.exc_info())
+
+        err = err.getvalue()
+        self.assertIn("""  File "b'bytes_filename'", line 123\n""", err)
+        self.assertIn("""    text\n""", err)
+        self.assertTrue(err.endswith("SyntaxError: msg\n"))
 
     def test_excepthook(self):
         with test.support.captured_output("stderr") as stderr:
@@ -89,6 +106,12 @@ class SysModuleTest(unittest.TestCase):
 
     # FIXME: testing the code for a lost or replaced excepthook in
     # Python/pythonrun.c::PyErr_PrintEx() is tricky.
+
+
+class SysModuleTest(unittest.TestCase):
+
+    def tearDown(self):
+        test.support.reap_children()
 
     def test_exit(self):
         # call with two arguments
@@ -173,7 +196,6 @@ class SysModuleTest(unittest.TestCase):
                 sys.setcheckinterval(n)
                 self.assertEqual(sys.getcheckinterval(), n)
 
-    @unittest.skipUnless(threading, 'Threading required for this test.')
     def test_switchinterval(self):
         self.assertRaises(TypeError, sys.setswitchinterval)
         self.assertRaises(TypeError, sys.setswitchinterval, "a")
@@ -349,21 +371,8 @@ class SysModuleTest(unittest.TestCase):
         )
 
     # sys._current_frames() is a CPython-only gimmick.
-    def test_current_frames(self):
-        have_threads = True
-        try:
-            import _thread
-        except ImportError:
-            have_threads = False
-
-        if have_threads:
-            self.current_frames_with_threads()
-        else:
-            self.current_frames_without_threads()
-
-    # Test sys._current_frames() in a WITH_THREADS build.
     @test.support.reap_threads
-    def current_frames_with_threads(self):
+    def test_current_frames(self):
         import threading
         import traceback
 
@@ -393,6 +402,9 @@ class SysModuleTest(unittest.TestCase):
         thread_id = thread_info[0]
 
         d = sys._current_frames()
+        for tid in d:
+            self.assertIsInstance(tid, int)
+            self.assertGreater(tid, 0)
 
         main_id = threading.get_ident()
         self.assertIn(main_id, d)
@@ -424,15 +436,6 @@ class SysModuleTest(unittest.TestCase):
         leave_g.set()
         t.join()
 
-    # Test sys._current_frames() when thread support doesn't exist.
-    def current_frames_without_threads(self):
-        # Not much happens here:  there is only one thread, with artificial
-        # "thread id" 0.
-        d = sys._current_frames()
-        self.assertEqual(len(d), 1)
-        self.assertIn(0, d)
-        self.assertTrue(d[0] is sys._getframe())
-
     def test_attributes(self):
         self.assertIsInstance(sys.api_version, int)
         self.assertIsInstance(sys.argv, list)
@@ -444,11 +447,17 @@ class SysModuleTest(unittest.TestCase):
         self.assertIsInstance(sys.executable, str)
         self.assertEqual(len(sys.float_info), 11)
         self.assertEqual(sys.float_info.radix, 2)
-        self.assertEqual(len(sys.int_info), 2)
+        self.assertEqual(len(sys.int_info), 4)
         self.assertTrue(sys.int_info.bits_per_digit % 5 == 0)
         self.assertTrue(sys.int_info.sizeof_digit >= 1)
+        self.assertGreaterEqual(sys.int_info.default_max_str_digits, 500)
+        self.assertGreaterEqual(sys.int_info.str_digits_check_threshold, 100)
+        self.assertGreater(sys.int_info.default_max_str_digits,
+                           sys.int_info.str_digits_check_threshold)
         self.assertEqual(type(sys.int_info.bits_per_digit), int)
         self.assertEqual(type(sys.int_info.sizeof_digit), int)
+        self.assertIsInstance(sys.int_info.default_max_str_digits, int)
+        self.assertIsInstance(sys.int_info.str_digits_check_threshold, int)
         self.assertIsInstance(sys.hexversion, int)
 
         self.assertEqual(len(sys.hash_info), 9)
@@ -514,8 +523,6 @@ class SysModuleTest(unittest.TestCase):
         if not sys.platform.startswith('win'):
             self.assertIsInstance(sys.abiflags, str)
 
-    @unittest.skipUnless(hasattr(sys, 'thread_info'),
-                         'Threading required for this test.')
     def test_thread_info(self):
         info = sys.thread_info
         self.assertEqual(len(info), 3)
@@ -528,10 +535,10 @@ class SysModuleTest(unittest.TestCase):
         self.assertEqual(sys.__stdout__.encoding, sys.__stderr__.encoding)
 
     def test_intern(self):
-        global numruns
-        numruns += 1
+        global INTERN_NUMRUNS
+        INTERN_NUMRUNS += 1
         self.assertRaises(TypeError, sys.intern)
-        s = "never interned before" + str(numruns)
+        s = "never interned before" + str(INTERN_NUMRUNS)
         self.assertTrue(sys.intern(s) is s)
         s2 = s.swapcase().swapcase()
         self.assertTrue(sys.intern(s2) is s)
@@ -552,12 +559,16 @@ class SysModuleTest(unittest.TestCase):
         attrs = ("debug",
                  "inspect", "interactive", "optimize", "dont_write_bytecode",
                  "no_user_site", "no_site", "ignore_environment", "verbose",
-                 "bytes_warning", "quiet", "hash_randomization", "isolated")
+                 "bytes_warning", "quiet", "hash_randomization", "isolated",
+                 "dev_mode", "utf8_mode", "int_max_str_digits")
         for attr in attrs:
             self.assertTrue(hasattr(sys.flags, attr), attr)
-            self.assertEqual(type(getattr(sys.flags, attr)), int, attr)
+            attr_type = bool if attr == "dev_mode" else int
+            self.assertEqual(type(getattr(sys.flags, attr)), attr_type, attr)
         self.assertTrue(repr(sys.flags))
         self.assertEqual(len(sys.flags), len(attrs))
+
+        self.assertIn(sys.flags.utf8_mode, {0, 1, 2})
 
     def assert_raise_on_new_sys_type(self, sys_attr):
         # Users are intentionally prevented from creating new instances of
@@ -676,10 +687,11 @@ class SysModuleTest(unittest.TestCase):
             expected = None
         self.check_fsencoding(fs_encoding, expected)
 
-    def c_locale_get_error_handler(self, isolated=False, encoding=None):
+    def c_locale_get_error_handler(self, locale, isolated=False, encoding=None):
         # Force the POSIX locale
         env = os.environ.copy()
-        env["LC_ALL"] = "C"
+        env["LC_ALL"] = locale
+        env["PYTHONCOERCECLOCALE"] = "0"
         code = '\n'.join((
             'import sys',
             'def dump(name):',
@@ -704,43 +716,49 @@ class SysModuleTest(unittest.TestCase):
         stdout, stderr = p.communicate()
         return stdout
 
-    def test_c_locale_surrogateescape(self):
-        out = self.c_locale_get_error_handler(isolated=True)
+    def check_locale_surrogateescape(self, locale):
+        out = self.c_locale_get_error_handler(locale, isolated=True)
         self.assertEqual(out,
                          'stdin: surrogateescape\n'
                          'stdout: surrogateescape\n'
                          'stderr: backslashreplace\n')
 
         # replace the default error handler
-        out = self.c_locale_get_error_handler(encoding=':ignore')
+        out = self.c_locale_get_error_handler(locale, encoding=':ignore')
         self.assertEqual(out,
                          'stdin: ignore\n'
                          'stdout: ignore\n'
                          'stderr: backslashreplace\n')
 
         # force the encoding
-        out = self.c_locale_get_error_handler(encoding='iso8859-1')
+        out = self.c_locale_get_error_handler(locale, encoding='iso8859-1')
         self.assertEqual(out,
                          'stdin: strict\n'
                          'stdout: strict\n'
                          'stderr: backslashreplace\n')
-        out = self.c_locale_get_error_handler(encoding='iso8859-1:')
+        out = self.c_locale_get_error_handler(locale, encoding='iso8859-1:')
         self.assertEqual(out,
                          'stdin: strict\n'
                          'stdout: strict\n'
                          'stderr: backslashreplace\n')
 
         # have no any effect
-        out = self.c_locale_get_error_handler(encoding=':')
+        out = self.c_locale_get_error_handler(locale, encoding=':')
         self.assertEqual(out,
                          'stdin: surrogateescape\n'
                          'stdout: surrogateescape\n'
                          'stderr: backslashreplace\n')
-        out = self.c_locale_get_error_handler(encoding='')
+        out = self.c_locale_get_error_handler(locale, encoding='')
         self.assertEqual(out,
                          'stdin: surrogateescape\n'
                          'stdout: surrogateescape\n'
                          'stderr: backslashreplace\n')
+
+    def test_c_locale_surrogateescape(self):
+        self.check_locale_surrogateescape('C')
+
+    def test_posix_locale_surrogateescape(self):
+        self.check_locale_surrogateescape('POSIX')
 
     def test_implementation(self):
         # This test applies to all implementations equally.
@@ -778,12 +796,20 @@ class SysModuleTest(unittest.TestCase):
     @unittest.skipUnless(hasattr(sys, "getallocatedblocks"),
                          "sys.getallocatedblocks unavailable on this build")
     def test_getallocatedblocks(self):
-        if (os.environ.get('PYTHONMALLOC', None)
-           and not sys.flags.ignore_environment):
-            self.skipTest("cannot test if PYTHONMALLOC env var is set")
+        try:
+            import _testcapi
+        except ImportError:
+            with_pymalloc = support.with_pymalloc()
+        else:
+            try:
+                alloc_name = _testcapi.pymem_getallocatorsname()
+            except RuntimeError as exc:
+                # "cannot get allocators name" (ex: tracemalloc is used)
+                with_pymalloc = True
+            else:
+                with_pymalloc = (alloc_name in ('pymalloc', 'pymalloc_debug'))
 
         # Some sanity checks
-        with_pymalloc = sysconfig.get_config_var('WITH_PYMALLOC')
         a = sys.getallocatedblocks()
         self.assertIs(type(a), int)
         if with_pymalloc:
@@ -830,6 +856,13 @@ class SysModuleTest(unittest.TestCase):
         rc, stdout, stderr = assert_python_ok('-c', code)
         self.assertEqual(stdout.rstrip(), b'True')
 
+    @unittest.skipUnless(hasattr(sys, 'getandroidapilevel'),
+                         'need sys.getandroidapilevel()')
+    def test_getandroidapilevel(self):
+        level = sys.getandroidapilevel()
+        self.assertIsInstance(level, int)
+        self.assertGreater(level, 0)
+
     def test_sys_tracebacklimit(self):
         code = """if 1:
             import sys
@@ -862,6 +895,9 @@ class SysModuleTest(unittest.TestCase):
         check(1<<1000, traceback)
         check(-1<<1000, [traceback[-1]])
         check(None, traceback)
+
+    def test_no_duplicates_in_meta_path(self):
+        self.assertEqual(len(sys.meta_path), len(set(sys.meta_path)))
 
 
 @test.support.cpython_only
@@ -1026,7 +1062,7 @@ class SizeofTest(unittest.TestCase):
         nfrees = len(x.f_code.co_freevars)
         extras = x.f_code.co_stacksize + x.f_code.co_nlocals +\
                   ncells + nfrees - 1
-        check(x, vsize('12P3ic' + CO_MAXBLOCKS*'3i' + 'P' + extras*'P'))
+        check(x, vsize('5P2c4P3ic' + CO_MAXBLOCKS*'3i' + 'P' + extras*'P'))
         # function
         def func(): pass
         check(func, size('12P'))
@@ -1043,7 +1079,7 @@ class SizeofTest(unittest.TestCase):
             check(bar, size('PP'))
         # generator
         def get_gen(): yield 1
-        check(get_gen(), size('Pb2PPP'))
+        check(get_gen(), size('Pb2PPP4P'))
         # iterator
         check(iter('abc'), size('lP'))
         # callable-iterator
@@ -1262,6 +1298,21 @@ class SizeofTest(unittest.TestCase):
         self.assertIsNone(cur.firstiter)
         self.assertIsNone(cur.finalizer)
 
+    def test_changing_sys_stderr_and_removing_reference(self):
+        # If the default displayhook doesn't take a strong reference
+        # to sys.stderr the following code can crash. See bpo-43660
+        # for more details.
+        code = textwrap.dedent('''
+            import sys
+            class MyStderr:
+                def write(self, s):
+                    sys.stderr = None
+            sys.stderr = MyStderr()
+            1/0
+        ''')
+        rc, out, err = assert_python_failure('-c', code)
+        self.assertEqual(out, b"")
+        self.assertEqual(err, b"")
 
 def test_main():
     test.support.run_unittest(SysModuleTest, SizeofTest)
