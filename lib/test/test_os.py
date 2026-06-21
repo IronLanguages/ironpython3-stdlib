@@ -374,6 +374,7 @@ class UtimeTests(unittest.TestCase):
         with open(self.fname, 'wb') as fp:
             fp.write(b"ABC")
 
+        return # ironpython: stat_float_times was removed in CPython 3.7 so it's not supported
         def restore_float_times(state):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", DeprecationWarning)
