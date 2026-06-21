@@ -476,6 +476,7 @@ class UtimeTests(unittest.TestCase):
         os.mkdir(self.dirname)
         create_file(self.fname)
 
+        return # ironpython: stat_float_times was removed in CPython 3.7 so it's not supported
         def restore_float_times(state):
             with ignore_deprecation_warnings('stat_float_times'):
                 os.stat_float_times(state)
