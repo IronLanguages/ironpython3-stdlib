@@ -1398,7 +1398,8 @@ class GetRandomTests(unittest.TestCase):
 OS_URANDOM_DONT_USE_FD = (
     sysconfig.get_config_var('HAVE_GETENTROPY') == 1
     or sysconfig.get_config_var('HAVE_GETRANDOM') == 1
-    or sysconfig.get_config_var('HAVE_GETRANDOM_SYSCALL') == 1)
+    or sysconfig.get_config_var('HAVE_GETRANDOM_SYSCALL') == 1
+    or sys.implementation.name == "ironpython")
 
 @unittest.skipIf(OS_URANDOM_DONT_USE_FD ,
                  "os.random() does not use a file descriptor")
@@ -1866,7 +1867,7 @@ class Pep383Tests(unittest.TestCase):
             add_filename(support.TESTFN_UNENCODABLE)
         if support.TESTFN_NONASCII:
             add_filename(support.TESTFN_NONASCII)
-        if not bytesfn:
+        if not bytesfn or sys.implementation.name == "ironpython": # https://github.com/IronLanguages/ironpython3/issues/2070
             self.skipTest("couldn't create any non-ascii filename")
 
         self.unicodefn = set()
