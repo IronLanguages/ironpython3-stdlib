@@ -731,7 +731,7 @@ def getenv(key, default=None):
     key, default and the result are str."""
     return environ.get(key, default)
 
-supports_bytes_environ = (name != 'nt')
+supports_bytes_environ = (name != 'nt') and sys.implementation.name != "ironpython" # https://github.com/IronLanguages/ironpython3/issues/2069
 __all__.extend(("getenv", "supports_bytes_environ"))
 
 if supports_bytes_environ:

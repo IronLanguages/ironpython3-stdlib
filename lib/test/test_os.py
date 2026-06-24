@@ -1122,7 +1122,7 @@ class URandomTests(unittest.TestCase):
         self.assertNotEqual(data1, data2)
 
 
-HAVE_GETENTROPY = (sysconfig.get_config_var('HAVE_GETENTROPY') == 1)
+HAVE_GETENTROPY = (sysconfig.get_config_var('HAVE_GETENTROPY') == 1) or sys.implementation.name == "ironpython"
 
 @unittest.skipIf(HAVE_GETENTROPY,
                  "getentropy() does not use a file descriptor")
@@ -1523,7 +1523,7 @@ class Pep383Tests(unittest.TestCase):
             add_filename(support.TESTFN_UNENCODABLE)
         if support.TESTFN_NONASCII:
             add_filename(support.TESTFN_NONASCII)
-        if not bytesfn:
+        if not bytesfn or sys.implementation.name == "ironpython": # https://github.com/IronLanguages/ironpython3/issues/2070
             self.skipTest("couldn't create any non-ascii filename")
 
         self.unicodefn = set()
