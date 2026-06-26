@@ -697,7 +697,7 @@ class EnvironTests(mapping_tests.BasicTestMappingProtocol):
         if sys.platform == "win32":
             # an environment variable is limited to 32,767 characters
             key = 'x' * 50000
-            self.assertRaises(ValueError, os.environ.__delitem__, key)
+            self.assertRaises((ValueError, KeyError), os.environ.__delitem__, key) # ironpython: KeyError can also be raised on .NET Core
         else:
             # "=" is not allowed in a variable name
             key = 'key='
