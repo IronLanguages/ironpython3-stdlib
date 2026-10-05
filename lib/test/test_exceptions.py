@@ -156,6 +156,7 @@ class ExceptionTests(unittest.TestCase):
         ckmsg(s, "'continue' not properly in loop")
         ckmsg("continue\n", "'continue' not properly in loop")
 
+    # ironpython: use testSyntaxErrorMissingParens from Python 3.10
     def testSyntaxErrorMissingParens(self):
         def ckmsg(src, msg, exception=SyntaxError):
             try:
@@ -167,15 +168,28 @@ class ExceptionTests(unittest.TestCase):
                 self.fail("failed to get expected SyntaxError")
 
         s = '''print "old style"'''
-        ckmsg(s, "Missing parentheses in call to 'print'. "
-                 "Did you mean print(\"old style\")?")
+        ckmsg(s, "Missing parentheses in call to 'print'. Did you mean print(...)?")
 
         s = '''print "old style",'''
-        ckmsg(s, "Missing parentheses in call to 'print'. "
-                 "Did you mean print(\"old style\", end=\" \")?")
+        ckmsg(s, "Missing parentheses in call to 'print'. Did you mean print(...)?")
+
+        s = 'print f(a+b,c)'
+        ckmsg(s, "Missing parentheses in call to 'print'. Did you mean print(...)?")
 
         s = '''exec "old style"'''
-        ckmsg(s, "Missing parentheses in call to 'exec'")
+        ckmsg(s, "Missing parentheses in call to 'exec'. Did you mean exec(...)?")
+
+        s = 'exec f(a+b,c)'
+        ckmsg(s, "Missing parentheses in call to 'exec'. Did you mean exec(...)?")
+
+        # Check that we don't incorrectly identify '(...)' as an expression to the right
+        # of 'print'
+
+        s = 'print (a+b,c) $ 42'
+        ckmsg(s, "invalid syntax")
+
+        s = 'exec (a+b,c) $ 42'
+        ckmsg(s, "invalid syntax")
 
         # should not apply to subclasses, see issue #31161
         s = '''if True:\nprint "No indent"'''
