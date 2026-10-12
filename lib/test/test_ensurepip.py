@@ -23,6 +23,15 @@ class EnsurepipMixin:
         self.run_pip.return_value = 0
         self.addCleanup(run_pip_patch.stop)
 
+        if sys.implementation.name == "ironpython":
+            # ironpython: we always add --no-compile, drop it so the expected argument lists match
+            run_pip_mock = self.run_pip
+            def run_pip(args, *rest, **kwargs):
+                return run_pip_mock([arg for arg in args if arg != "--no-compile"], *rest, **kwargs)
+            ironpython_patch = unittest.mock.patch("ensurepip._run_pip", run_pip)
+            ironpython_patch.start()
+            self.addCleanup(ironpython_patch.stop)
+
         # Avoid side effects on the actual os module
         real_devnull = os.devnull
         os_patch = unittest.mock.patch("ensurepip.os")
