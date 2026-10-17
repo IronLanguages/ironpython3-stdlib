@@ -387,3 +387,11 @@ class Integral(Rational):
         return 1
 
 Integral.register(int)
+
+import sys
+if sys.implementation.name == 'ironpython':
+    # System.Decimal is an exact decimal fraction with numerator and denominator, so decimal.Decimal and
+    # fractions.Fraction can compare with it through their Rational handling.
+    import System
+    Rational.register(System.Decimal)
+del sys
