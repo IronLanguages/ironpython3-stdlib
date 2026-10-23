@@ -1149,6 +1149,8 @@ class _SpecMethods:
         spec.loader.load_module(spec.name)
         # The module must be in sys.modules at this point!
         module = sys.modules[spec.name]
+        if isinstance(module, type): # ironpython: .NET types can be imported
+            return module
         if getattr(module, '__loader__', None) is None:
             try:
                 module.__loader__ = spec.loader
@@ -2178,7 +2180,9 @@ def _find_and_load_unlocked(name, import_):
     if parent:
         # Set the module as an attribute on its parent.
         parent_module = sys.modules[parent]
-        setattr(parent_module, name.rpartition('.')[2], module)
+        child = name.rpartition('.')[2]
+        if getattr(parent_module, child, None) is not module: # ironpython: .NET namespaces already have their children
+            setattr(parent_module, child, module)
     return module
 
 
