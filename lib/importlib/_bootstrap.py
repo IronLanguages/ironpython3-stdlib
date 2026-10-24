@@ -1211,8 +1211,9 @@ class _SpecMethods:
         clobbered.
 
         """
+        name = self.spec.name # ironpython: get the name first so a None spec doesn't leak the import lock
         _imp.acquire_lock()
-        with _ModuleLockManager(self.spec.name):
+        with _ModuleLockManager(name):
             return self._load_unlocked()
 
 
