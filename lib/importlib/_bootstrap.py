@@ -288,6 +288,12 @@ def _get_module_lock(name):
             lock = _ModuleLock(name)
         def cb(_):
             del _module_locks[name]
+
+        # ironpython: no callback to remove the dead entry, weakref callbacks run on the
+        # finalizer thread and could delete a newer lock created by another thread (bpo-31070);
+        # a dead entry is replaced the next time the lock is needed
+        cb = None
+
         _module_locks[name] = _weakref.ref(lock, cb)
     return lock
 
