@@ -187,6 +187,11 @@ def _get_module_lock(name):
                 finally:
                     _imp.release_lock()
 
+            # ironpython: no callback to remove the dead entry, weakref callbacks run on the
+            # finalizer thread and taking the import lock there can deadlock with gc.collect();
+            # a dead entry is replaced the next time the lock is needed
+            cb = None
+
             _module_locks[name] = _weakref.ref(lock, cb)
     finally:
         _imp.release_lock()
