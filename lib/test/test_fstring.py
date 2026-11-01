@@ -899,10 +899,9 @@ non-important content
 
     def test_conversions(self):
         self.assertEqual(f'{3.14:10.10}', '      3.14')
-        # ironpython: float repr differences (https://github.com/IronLanguages/ironpython2/issues/102)
-        #self.assertEqual(f'{3.14!s:10.10}', '3.14      ')
-        #self.assertEqual(f'{3.14!r:10.10}', '3.14      ')
-        #self.assertEqual(f'{3.14!a:10.10}', '3.14      ')
+        self.assertEqual(f'{3.14!s:10.10}', '3.14      ')
+        self.assertEqual(f'{3.14!r:10.10}', '3.14      ')
+        self.assertEqual(f'{3.14!a:10.10}', '3.14      ')
 
         self.assertEqual(f'{"a"}', 'a')
         self.assertEqual(f'{"a"!r}', "'a'")
