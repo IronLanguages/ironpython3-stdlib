@@ -2162,6 +2162,9 @@ def wait_threads_exit(timeout=60.0):
     which doesn't allow to wait for thread exit, whereas thread.Thread has a
     join() method.
     """
+    if not _thread: # ironpython: _thread is None on Mono due to https://github.com/IronLanguages/ironpython3/issues/1005
+        yield
+        return
     old_count = _thread._count()
     try:
         yield
